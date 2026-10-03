@@ -112,6 +112,40 @@ If automatic installation doesn't work, add this to your MCP config:
 }
 ```
 
+## Credentials in Injected Servers
+
+A registry entry can carry a credential as a literal value (`--env`, `--headers`) or as a reference to an
+environment variable (`--header-env HEADER=VAR`, `--env-from NAME=VAR`). A reference writes only the
+variable name; the harness reads the value when it starts the server. Each harness spells a reference
+differently:
+
+| Harness | `--header-env` / `--env-from` renders as |
+| --- | --- |
+| Claude Code | `${VAR}` |
+| Cursor, Windsurf | `${env:VAR}` |
+| Factory | `${VAR}` |
+| opencode | `{env:VAR}` |
+| OMP, Grok Build | `${VAR}` |
+| Codex | `env_http_headers = { HEADER = "VAR" }` and `env_vars = ["VAR"]` |
+| Antigravity, Warp | refused: neither documents interpolation in its MCP config |
+
+Codex forwards a variable only under its own name, so `--env-from` for Codex must map `VAR=VAR`.
+Claude Code reads `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `NPM_TOKEN` as empty in a remote
+server's URL and headers, so do not reference those.
+
+The credential policy decides what `aiwg mcp inject` will render:
+
+| Policy | Flag | Renders |
+| --- | --- | --- |
+| `literal` (default) | none | everything |
+| `references` | `--strict-credentials` | references only; refuses literal `env`/`headers`, URL userinfo, OAuth client secrets |
+| `none` | `--no-credentials` | refuses every credential-bearing field, references included |
+
+A refusal names each server and field, exits non-zero and writes nothing, including in `--ephemeral`
+mode. Precedence is the flag, then `AIWG_MCP_CREDENTIAL_POLICY`, then the registry default set with
+`aiwg mcp credential-policy <policy>`. `aiwg session --provider codex --profile <p>` applies the same
+policy to the profile's runtime config.
+
 ## Technical Details
 
 - **Transport:** stdio (standard input/output)

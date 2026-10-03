@@ -574,7 +574,7 @@ describe("injectServers", () => {
     const result = await inject(registry, provider, { projectDir, servers: ["matrix"] });
     const configPath = join(location === "home" ? join(tempDir, "provider-home") : projectDir, file);
     const entry = shape === "opencode"
-      ? { type: "local", command: ["synthetic-command", "--literal", "space value"], env: { SYNTHETIC_SETTING: "keep" } }
+      ? { type: "local", command: ["synthetic-command", "--literal", "space value"], environment: { SYNTHETIC_SETTING: "keep" } }
       : { ...(shape === "factory" ? { type: "stdio", disabled: false } : {}), command: "synthetic-command", args: ["--literal", "space value"], env: { SYNTHETIC_SETTING: "keep" } };
     expect(result).toEqual({ provider, configPath, serversInjected: ["matrix"], alreadyPresent: [] });
     expect(JSON.parse(await readFile(configPath, "utf-8"))).toEqual({ [shape === "opencode" ? "mcp" : "mcpServers"]: { matrix: entry } });
