@@ -18,6 +18,12 @@ import {
   getProviderConfigPath,
 } from './registry.mjs';
 import { McpProfileRegistry } from './profiles.mjs';
+import {
+  applyJsonToolFilterPlan,
+  hasToolFilters,
+  planToolFilters,
+  resolveToolFilters,
+} from './tool-filters.mjs';
 import { getMcpInjectionDefinition } from '../providers/provider-definitions.mjs';
 import { manageOmpMcp } from './omp-config.mjs';
 import { unmanageGrokBuildMcp } from './grok-build-config.mjs';
@@ -673,9 +679,10 @@ async function handleInject(args) {
 
   // Resolve server filter: --profile takes precedence over --servers
   let serverFilter;
+  let profile;
   if (profileName) {
     const profiles = new McpProfileRegistry();
-    const profile = await profiles.get(profileName);
+    profile = await profiles.get(profileName);
     if (!profile) {
       const all = await profiles.list();
       console.error(`Profile "${profileName}" not found.`);
@@ -724,7 +731,12 @@ async function handleInject(args) {
 
   let totalInjected = 0;
 
+  const printWarnings = (warnings = []) => {
+    for (const warning of warnings) console.error(`  WARNING ${warning}`);
+  };
+
   for (const p of providers) {
+    const toolFilters = profile ? resolveToolFilters(profile, p) : undefined;
     if (ephemeral) {
       // Generate a standalone ephemeral config file
       const targetPath = outPath ?? path.join(
@@ -759,17 +771,26 @@ async function handleInject(args) {
       if (Object.keys(mcpBlock).length === 0) continue;
 
       const config = { [mcpKey]: mcpBlock };
+      const toolPlan = hasToolFilters(toolFilters) ? planToolFilters(p, Object.keys(mcpBlock), toolFilters) : null;
+      if (toolPlan) applyJsonToolFilterPlan(config, mcpKey, toolPlan);
+      // Claude Code reads permission rules from settings, not from --mcp-config.
+      const settingsPath = toolPlan?.claudePermissions ? targetPath.replace(/(\.json)?$/, '.settings.json') : null;
 
       if (!dryRun) {
         await fs.mkdir(path.dirname(targetPath), { recursive: true });
         await fs.writeFile(targetPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+        if (settingsPath) {
+          await fs.writeFile(settingsPath, JSON.stringify({ permissions: toolPlan.claudePermissions }, null, 2) + '\n', 'utf-8');
+        }
       }
 
       const prefix = dryRun ? '[DRY RUN] ' : '';
       console.log(`${prefix}${p}: ${targetPath}`);
       console.log(`  ${prefix}Servers: ${Object.keys(mcpBlock).join(', ')}`);
+      if (settingsPath) console.log(`  ${prefix}Tool permissions: ${settingsPath}`);
+      printWarnings(toolPlan?.warnings);
       if (!dryRun && (p === 'claude-code' || p === 'claude')) {
-        console.log(`  Launch with: claude --mcp-config ${targetPath}`);
+        console.log(`  Launch with: claude --mcp-config ${targetPath}${settingsPath ? ` --settings ${settingsPath}` : ''}`);
       }
       totalInjected += Object.keys(mcpBlock).length;
       continue;
@@ -781,6 +802,7 @@ async function handleInject(args) {
       projectDir,
       dryRun,
       scope,
+      ...(hasToolFilters(toolFilters) ? { toolFilters } : {}),
     });
 
     if (result.error) {
@@ -798,6 +820,8 @@ async function handleInject(args) {
     if (result.alreadyPresent.length > 0) {
       console.log(`  ${prefix}Updated in place: ${result.alreadyPresent.join(', ')}`);
     }
+    if (result.settingsPath) console.log(`  ${prefix}Tool permissions: ${result.settingsPath}`);
+    printWarnings(result.warnings);
   }
 
   if (!dryRun && totalInjected > 0 && !ephemeral) {
@@ -818,9 +842,12 @@ aiwg mcp profile — MCP server profiles (named server subsets)
 
 Usage:
   aiwg mcp profile add <name> --servers a,b,c [--description "..."]
+                          [--provider <p|*>] [--tool-deny s__t,...] [--tool-allow s__t,...]
   aiwg mcp profile list
   aiwg mcp profile show <name>
   aiwg mcp profile edit <name> [--add-server x] [--remove-server y] [--description "..."]
+                          [--provider <p|*>] [--tool-deny s__t,...] [--tool-allow s__t,...]
+                          [--clear-tool-filters]
   aiwg mcp profile remove <name>
   aiwg mcp profile import <file>
   aiwg mcp profile export <name> [--out <file>]
@@ -832,9 +859,32 @@ Profiles let you define named subsets of your registered MCP servers:
   aiwg mcp inject --provider claude --profile dev --ephemeral
   aiwg session --provider claude --profile dev
 
+Tool filters name tools as <server>__<tool>; <tool> may contain *. --provider
+defaults to *, which applies to every provider. inject renders them into each
+provider's own setting and warns about any filter the provider cannot express:
+  aiwg mcp profile edit dev --tool-deny git-gitea__delete_repo
+  aiwg mcp profile edit dev --provider codex --tool-allow git-gitea__list_repos
+
 Preset profiles (minimal, dev, ops, research, incident, full):
   aiwg mcp profile init-presets
 `);
+}
+
+/**
+ * Parse --provider / --tool-deny / --tool-allow into a providerOverrides map.
+ */
+function parseToolFilterFlags(args) {
+  const deny = parseFlag(args, '--tool-deny');
+  const allow = parseFlag(args, '--tool-allow');
+  if (!deny && !allow) return undefined;
+  const split = value => value.split(',').map(s => s.trim()).filter(Boolean);
+  const provider = parseFlag(args, '--provider') || '*';
+  return {
+    [provider]: {
+      ...(deny ? { toolDeny: split(deny) } : {}),
+      ...(allow ? { toolAllow: split(allow) } : {}),
+    },
+  };
 }
 
 /**
@@ -856,11 +906,12 @@ async function handleProfileAdd(args) {
   }
 
   const servers = serversStr ? serversStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const providerOverrides = parseToolFilterFlags(args);
 
   const profiles = new McpProfileRegistry();
   const registry = new McpServerRegistry();
 
-  await profiles.add({ name, description, servers }, registry);
+  await profiles.add({ name, description, servers, ...(providerOverrides ? { providerOverrides } : {}) }, registry);
 
   console.log(`Profile added: ${name}`);
   if (description) console.log(`  Description: ${description}`);
@@ -967,14 +1018,18 @@ async function handleProfileEdit(args) {
   const removeServer = parseFlag(args, '--remove-server');
   const description = parseFlag(args, '--description');
 
+  const providerOverrides = parseToolFilterFlags(args);
+  const clearToolFilters = args.includes('--clear-tool-filters');
   const changes = {
     description,
     addServers: addServer ? addServer.split(',').map(s => s.trim()) : undefined,
     removeServers: removeServer ? removeServer.split(',').map(s => s.trim()) : undefined,
+    providerOverrides,
+    clearToolFilters: clearToolFilters ? (parseFlag(args, '--provider') || '*') : undefined,
   };
 
-  if (!description && !addServer && !removeServer) {
-    console.error('No changes specified. Use --add-server, --remove-server, or --description.');
+  if (!description && !addServer && !removeServer && !providerOverrides && !clearToolFilters) {
+    console.error('No changes specified. Use --add-server, --remove-server, --description, --tool-deny, --tool-allow or --clear-tool-filters.');
     process.exit(1);
   }
 

@@ -112,6 +112,36 @@ If automatic installation doesn't work, add this to your MCP config:
 }
 ```
 
+## Profile Tool Filters
+
+A profile can deny or allow individual tools. Patterns name a tool as `<server>__<tool>`; `<tool>` may
+contain `*`, and `<server>__*` covers the whole server. The `*` provider key applies to every
+provider, and a provider's own key adds to it:
+
+```bash
+aiwg mcp profile edit dev --tool-deny git-gitea__delete_repo
+aiwg mcp profile edit dev --provider codex --tool-allow git-gitea__list_repos,git-gitea__get_file
+aiwg mcp profile edit dev --provider codex --clear-tool-filters
+```
+
+`aiwg mcp inject --profile <p>` renders the filters into each provider's own setting. Anything a
+provider cannot express is printed as a `WARNING` line on stderr; it is not applied.
+
+| Provider | toolDeny | toolAllow | Globs |
+| --- | --- | --- | --- |
+| Claude Code | `permissions.deny` rule `mcp__<server>__<tool>` | `permissions.allow` (pre-approval, not an allowlist) | yes |
+| Codex | `disabled_tools`; `enabled = false` for `<server>__*` | `enabled_tools` | no |
+| opencode | `tools` map entry `<server>_<tool>: false` | `<server>_*: false`, then each tool `true` | yes |
+| Factory, Antigravity | `disabledTools`; `disabled: true` for `<server>__*` | not supported | no |
+| Windsurf | `disabledTools` | not supported | no |
+| Cursor, Warp, OMP, Grok Build | not supported | not supported | |
+
+Claude Code reads permission rules from settings, not from the MCP file: persistent injection adds
+them to `.claude/settings.local.json` (`~/.claude/settings.json` with `--scope user`) and keeps the
+rules already there. `--ephemeral --out run.json` also writes `run.settings.json` and prints
+`claude --mcp-config run.json --settings run.settings.json`. `aiwg session --provider codex
+--profile <p>` writes the Codex filters into the profile's runtime config.
+
 ## Technical Details
 
 - **Transport:** stdio (standard input/output)

@@ -2,6 +2,7 @@ import { manageOmpMcp } from './omp-config.mjs';
 import { manageGrokBuildMcp } from './grok-build-config.mjs';
 import { replaceServer } from './toml-editor.mjs';
 import { resolveOmpPaths } from '../providers/omp-paths.mjs';
+import { applyJsonToolFilterPlan, claudeSettingsPath, mergeClaudePermissions, planToolFilters, type ToolFilterPlan, type ToolFilters } from './tool-filters.mjs';
 /**
  * MCP Server Registry
  *
@@ -409,6 +410,10 @@ export interface InjectResult {
   serversInjected: string[];
   alreadyPresent: string[];
   error?: string;
+  /** Profile tool filters the provider cannot express; present only when filters were requested. */
+  warnings?: string[];
+  /** Claude Code settings file that received permission rules. */
+  settingsPath?: string;
 }
 
 /**
@@ -462,6 +467,7 @@ export async function injectServers(
     servers?: string[];
     projectDir?: string;
     dryRun?: boolean;
+    toolFilters?: ToolFilters;
   } = {},
 ): Promise<InjectResult> {
   const { servers: serverFilter, projectDir = '.', dryRun = false } = options;
@@ -483,6 +489,11 @@ export async function injectServers(
     result.error = 'No servers to inject. Use "aiwg mcp add" first.';
     return result;
   }
+
+  const toolPlan = options.toolFilters
+    ? planToolFilters(provider, allServers.map(server => server.name), options.toolFilters)
+    : null;
+  if (toolPlan) result.warnings = toolPlan.warnings;
 
   if (provider === 'omp' || provider === 'oh-my-pi') {
     try {
@@ -509,11 +520,11 @@ export async function injectServers(
 
   // Handle TOML-based providers (Codex/OpenAI) separately
   if (provider === 'codex' || provider === 'openai') {
-    return injectToml(registry, allServers, configPath, provider, dryRun, result);
+    return injectToml(registry, allServers, configPath, provider, dryRun, result, toolPlan);
   }
 
   // JSON-based providers
-  return injectJson(registry, allServers, configPath, provider, dryRun, result);
+  return injectJson(registry, allServers, configPath, provider, dryRun, result, toolPlan, { projectDir, scope: options.scope });
 }
 
 async function injectJson(
@@ -523,6 +534,8 @@ async function injectJson(
   provider: InjectProvider,
   dryRun: boolean,
   result: InjectResult,
+  toolPlan: ToolFilterPlan | null = null,
+  location: { projectDir?: string; scope?: 'user' | 'project' } = {},
 ): Promise<InjectResult> {
   // Load existing config
   let existing: Record<string, unknown> = {};
@@ -562,6 +575,12 @@ async function injectJson(
 
   // Merge back
   const merged = { ...existing, [mcpKey]: newServers };
+  if (toolPlan) {
+    applyJsonToolFilterPlan(merged, mcpKey, {
+      ...toolPlan,
+      serverFields: Object.fromEntries(Object.entries(toolPlan.serverFields).filter(([name]) => result.serversInjected.includes(name))),
+    });
+  }
 
   if (!dryRun) {
     await mkdir(resolve(configPath, '..'), { recursive: true });
@@ -574,6 +593,12 @@ async function injectJson(
     }
   }
 
+
+  if (toolPlan?.claudePermissions) {
+    const settingsPath = claudeSettingsPath(location.projectDir, location.scope);
+    await mergeClaudePermissions(settingsPath, toolPlan.claudePermissions, { dryRun });
+    result.settingsPath = settingsPath;
+  }
   return result;
 }
 
@@ -584,6 +609,7 @@ async function injectToml(
   provider: InjectProvider,
   dryRun: boolean,
   result: InjectResult,
+  toolPlan: ToolFilterPlan | null = null,
 ): Promise<InjectResult> {
   let existing = '';
   try {
@@ -593,7 +619,8 @@ async function injectToml(
   }
 
   for (const server of servers) {
-    const edited = replaceServer(existing, server.name, buildServerToml(server));
+    const filterLines = toolPlan?.tomlLines[server.name] || [];
+    const edited = replaceServer(existing, server.name, [buildServerToml(server), ...filterLines].join('\n'));
     existing = edited.text;
     if (edited.alreadyPresent) result.alreadyPresent.push(server.name);
     result.serversInjected.push(server.name);

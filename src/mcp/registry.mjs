@@ -2,6 +2,7 @@ import { manageOmpMcp } from './omp-config.mjs';
 import { manageGrokBuildMcp } from './grok-build-config.mjs';
 import { replaceServer } from './toml-editor.mjs';
 import { resolveOmpPaths } from '../providers/omp-paths.mjs';
+import { applyJsonToolFilterPlan, claudeSettingsPath, mergeClaudePermissions, planToolFilters } from './tool-filters.mjs';
 /**
  * MCP Server Registry (Runtime ESM)
  *
@@ -351,6 +352,11 @@ export async function injectServers(registry, provider, options = {}) {
     return result;
   }
 
+  const toolPlan = options.toolFilters
+    ? planToolFilters(provider, allServers.map(server => server.name), options.toolFilters)
+    : null;
+  if (toolPlan) result.warnings = toolPlan.warnings;
+
   if (normalizedProvider === 'omp') {
     try {
       const managed = await manageOmpMcp(configPath, allServers, { dryRun });
@@ -380,13 +386,13 @@ export async function injectServers(registry, provider, options = {}) {
   }
 
   if (mcpDefinition?.configFormat === 'toml') {
-    return injectToml(registry, allServers, configPath, provider, dryRun, result);
+    return injectToml(registry, allServers, configPath, provider, dryRun, result, toolPlan);
   }
 
-  return injectJson(registry, allServers, configPath, provider, dryRun, result);
+  return injectJson(registry, allServers, configPath, provider, dryRun, result, toolPlan, { projectDir, scope: options.scope });
 }
 
-async function injectJson(registry, servers, configPath, provider, dryRun, result) {
+async function injectJson(registry, servers, configPath, provider, dryRun, result, toolPlan = null, location = {}) {
   let existing = {};
   try {
     const content = await readFile(configPath, 'utf-8');
@@ -419,6 +425,12 @@ async function injectJson(registry, servers, configPath, provider, dryRun, resul
   }
 
   const merged = { ...existing, [mcpKey]: newServers };
+  if (toolPlan) {
+    applyJsonToolFilterPlan(merged, mcpKey, {
+      ...toolPlan,
+      serverFields: Object.fromEntries(Object.entries(toolPlan.serverFields).filter(([name]) => result.serversInjected.includes(name))),
+    });
+  }
 
   if (!dryRun) {
     await mkdir(resolve(configPath, '..'), { recursive: true });
@@ -430,10 +442,16 @@ async function injectJson(registry, servers, configPath, provider, dryRun, resul
     }
   }
 
+
+  if (toolPlan?.claudePermissions) {
+    const settingsPath = claudeSettingsPath(location.projectDir, location.scope);
+    await mergeClaudePermissions(settingsPath, toolPlan.claudePermissions, { dryRun });
+    result.settingsPath = settingsPath;
+  }
   return result;
 }
 
-async function injectToml(registry, servers, configPath, provider, dryRun, result) {
+async function injectToml(registry, servers, configPath, provider, dryRun, result, toolPlan = null) {
   let existing = '';
   try {
     existing = await readFile(configPath, 'utf-8');
@@ -442,7 +460,8 @@ async function injectToml(registry, servers, configPath, provider, dryRun, resul
   }
 
   for (const server of servers) {
-    const edited = replaceServer(existing, server.name, buildServerToml(server));
+    const filterLines = toolPlan?.tomlLines[server.name] || [];
+    const edited = replaceServer(existing, server.name, [buildServerToml(server), ...filterLines].join('\n'));
     existing = edited.text;
     if (edited.alreadyPresent) result.alreadyPresent.push(server.name);
     result.serversInjected.push(server.name);
