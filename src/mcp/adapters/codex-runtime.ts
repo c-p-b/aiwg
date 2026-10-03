@@ -22,6 +22,7 @@ import { existsSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { buildServerToml, type McpServerDefinition } from '../registry.js';
 import { assertCredentialPolicy, type McpCredentialPolicy } from '../credentials.mjs';
+import { planToolFilters, type ToolFilters } from '../tool-filters.mjs';
 
 // ─────────────────────────────────────────────
 // Types
@@ -121,9 +122,12 @@ export async function ensureRuntimeHome(
 export async function writeProfileConfig(
   profile: string,
   servers: McpServerDefinition[],
-  options: { credentialPolicy?: McpCredentialPolicy } = {},
-): Promise<void> {
+  options: { credentialPolicy?: McpCredentialPolicy; toolFilters?: ToolFilters } = {},
+): Promise<string[]> {
   assertCredentialPolicy(servers, options.credentialPolicy);
+  const toolPlan = options.toolFilters
+    ? planToolFilters('codex', servers.map((server) => server.name), options.toolFilters)
+    : null;
   const rtHome = runtimeHomePath(profile);
   await mkdir(rtHome, { recursive: true });
 
@@ -141,7 +145,8 @@ export async function writeProfileConfig(
   }
 
   // Build profile-specific [mcp_servers.*] TOML sections
-  const mcpSections = servers.map((server) => buildServerToml(server));
+  const mcpSections = servers.map((server) =>
+    [buildServerToml(server), ...(toolPlan?.tomlLines[server.name] ?? [])].join('\n'));
 
   const configContent =
     (baseConfig ? baseConfig + '\n\n' : '') +
@@ -149,6 +154,7 @@ export async function writeProfileConfig(
     '\n';
 
   await writeFile(runtimeConfigPath(profile), configContent, 'utf-8');
+  return toolPlan?.warnings ?? [];
 }
 
 /**
