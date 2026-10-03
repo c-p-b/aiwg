@@ -433,7 +433,7 @@ export const sessionHandler: CommandHandler = {
           const { resolveToolFilters } = await import('../../mcp/tool-filters.mjs');
           const warnings = await writeProfileConfig(profile, resolvedServers, {
             credentialPolicy: resolveCredentialPolicy({ registryPolicy: await registry.getCredentialPolicy() }),
-            toolFilters: resolveToolFilters(await profiles.get(profile), 'codex'),
+            toolFilters: resolveToolFilters(await profiles.resolve(profile), 'codex'),
           });
           for (const warning of warnings) console.warn(`  WARN  codex: ${warning}`);
           console.log(`  Runtime home ready. Profile servers: ${resolvedServers.map((s) => s.name).join(', ') || '(none)'}`);

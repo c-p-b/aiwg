@@ -176,6 +176,32 @@ rules already there. `--ephemeral --out run.json` also writes `run.settings.json
 `claude --mcp-config run.json --settings run.settings.json`. `aiwg session --provider codex
 --profile <p>` writes the Codex filters into the profile's runtime config.
 
+## Layered Configuration
+
+`AIWG_CONFIG_LAYERS` lists configuration directories, lowest precedence first, separated by the
+platform path delimiter (`:` on Linux and macOS, `;` on Windows). Each directory may hold
+`mcp-servers.json` and `mcp-profiles.json`. Use it to keep an organisation's servers and profiles in
+one directory and a person's overlay for that organisation in another:
+
+```bash
+export AIWG_CONFIG_LAYERS=/etc/aiwg/acme:$HOME/.aiwg/acme-identity
+aiwg mcp profile add acme-dev --extends acme-base --servers tracker
+aiwg mcp inject --provider claude --profile acme-dev --ephemeral --out /tmp/acme-dev.json
+```
+
+| Rule | Behaviour |
+| --- | --- |
+| Precedence | A server or profile in a later layer replaces the entry of the same name in an earlier one, whole |
+| Writes | `add`, `update`, `profile add/edit` and injection records go to the last layer only |
+| Lower-layer entries | Updating one copies it into the last layer; removing one is refused |
+| `extends` | A profile inherits the servers of each base profile (base first), from any layer |
+| Tool filters under `extends` | `toolDeny` accumulates along the chain; `toolAllow` comes from the most-derived profile that sets it |
+| Set | `AIWG_CONFIG` is ignored for MCP servers and profiles |
+| Unset | `AIWG_CONFIG` or `~/.aiwg` is the single directory, as before |
+
+Injection records (`injectedProviders`, used by `inject --all`) for a server defined in a lower layer
+are not persisted, so that the last layer holds no copy of an unchanged organisation entry.
+
 ## Technical Details
 
 - **Transport:** stdio (standard input/output)

@@ -711,7 +711,7 @@ async function handleInject(args) {
   let profile;
   if (profileName) {
     const profiles = new McpProfileRegistry();
-    profile = await profiles.get(profileName);
+    profile = await profiles.resolve(profileName);
     if (!profile) {
       const all = await profiles.list();
       console.error(`Profile "${profileName}" not found.`);
@@ -872,7 +872,7 @@ function printProfileUsage() {
 aiwg mcp profile — MCP server profiles (named server subsets)
 
 Usage:
-  aiwg mcp profile add <name> --servers a,b,c [--description "..."]
+  aiwg mcp profile add <name> --servers a,b,c [--extends base,...] [--description "..."]
                           [--provider <p|*>] [--tool-deny s__t,...] [--tool-allow s__t,...]
   aiwg mcp profile list
   aiwg mcp profile show <name>
@@ -895,6 +895,14 @@ defaults to *, which applies to every provider. inject renders them into each
 provider's own setting and warns about any filter the provider cannot express:
   aiwg mcp profile edit dev --tool-deny git-gitea__delete_repo
   aiwg mcp profile edit dev --provider codex --tool-allow git-gitea__list_repos
+
+Layered configuration (organisation base, identity overlay):
+  AIWG_CONFIG_LAYERS=/etc/aiwg/org:/home/me/.aiwg/acme aiwg mcp inject \
+    --provider claude --profile acme-dev --ephemeral --out /tmp/acme.json
+  Directories are listed lowest precedence first (path delimiter separated).
+  A server or profile in a later layer replaces one of the same name in an
+  earlier layer. Writes go to the last layer. --extends lets a profile inherit
+  another profile's servers and tool filters from any layer.
 
 Preset profiles (minimal, dev, ops, research, incident, full):
   aiwg mcp profile init-presets
@@ -931,8 +939,10 @@ async function handleProfileAdd(args) {
 
   const serversStr = parseFlag(args, '--servers');
   const description = parseFlag(args, '--description');
+  const extendsStr = parseFlag(args, '--extends');
+  const bases = extendsStr ? extendsStr.split(',').map(s => s.trim()).filter(Boolean) : undefined;
 
-  if (!serversStr && name !== 'minimal') {
+  if (!serversStr && !bases && name !== 'minimal') {
     console.error('Warning: no --servers specified. Profile will start empty.');
   }
 
@@ -942,7 +952,13 @@ async function handleProfileAdd(args) {
   const profiles = new McpProfileRegistry();
   const registry = new McpServerRegistry();
 
-  await profiles.add({ name, description, servers, ...(providerOverrides ? { providerOverrides } : {}) }, registry);
+  await profiles.add({
+    name,
+    description,
+    servers,
+    ...(bases ? { extends: bases } : {}),
+    ...(providerOverrides ? { providerOverrides } : {}),
+  }, registry);
 
   console.log(`Profile added: ${name}`);
   if (description) console.log(`  Description: ${description}`);
@@ -998,6 +1014,11 @@ async function handleProfileShow(args) {
 
   console.log(`Profile: ${profile.name}`);
   if (profile.description) console.log(`Description: ${profile.description}`);
+  if (profile.extends?.length) {
+    console.log(`Extends: ${profile.extends.join(', ')}`);
+    const resolved = await profiles.resolve(name);
+    console.log(`Resolved servers: ${resolved.servers.join(', ') || '(none)'}`);
+  }
   console.log(`\nServers (${profile.servers.length}):`);
 
   if (profile.servers.length === 0) {

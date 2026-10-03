@@ -23,12 +23,15 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
   `disabled_tools`/`enabled_tools`, opencode its `tools` map, and Factory, Windsurf and Antigravity
   `disabledTools`. A filter a provider cannot express is printed as a warning. `aiwg mcp profile add`
   and `edit` accept `--tool-deny`, `--tool-allow`, `--provider` and `--clear-tool-filters`.
+- `AIWG_CONFIG_LAYERS` reads MCP servers and profiles from several configuration directories, lowest
+  precedence first, so an organisation base and a per-identity overlay can be kept apart. Writes go to
+  the last directory only. Profiles gain `extends` (`aiwg mcp profile add --extends`), resolved across
+  layers by `aiwg mcp inject --profile`, including `--ephemeral`.
 
 ### Fixed
 
 - opencode local servers now receive their variables as `environment`, the key opencode reads, instead
   of `env`.
-
 - `aiwg mcp inject --provider claude` and `aiwg mcp install claude` now write project MCP servers to
   `.mcp.json`. They previously wrote `mcpServers` into `.claude/settings.local.json`, which Claude Code
   does not read, so injected servers never loaded. `--scope user` writes `~/.claude.json`. HTTP and SSE
