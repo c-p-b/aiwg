@@ -38,11 +38,11 @@ const implementations = [
 describe.each(implementations)("$implementation credential reference rendering", ({ build, toml }) => {
   it.each(["claude-code", "cursor", "windsurf", "factory", "opencode"] as InjectProvider[])("matches the %s golden file", provider => {
     const rendered = Object.fromEntries(servers.map(server => [server.name, build(server, provider)]));
-    expect(rendered).toEqual(JSON.parse(readFileSync(join(fixtures, `${provider}.json`), "utf-8")));
+    expect(rendered).toEqual(JSON.parse(readFileSync(join(fixtures, `${provider}.golden.json`), "utf-8")));
   });
 
   it("matches the codex golden file", () => {
-    expect(servers.map(server => toml(server)).join("\n\n") + "\n").toBe(readFileSync(join(fixtures, "codex.toml"), "utf-8"));
+    expect(servers.map(server => toml(server)).join("\n\n") + "\n").toBe(readFileSync(join(fixtures, "codex.golden.toml"), "utf-8"));
   });
 
   it.each(["antigravity", "warp"] as InjectProvider[])("refuses references for %s, which documents no interpolation", provider => {
