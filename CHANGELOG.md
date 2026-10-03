@@ -7,6 +7,13 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
 
 ## [Unreleased]
 
+### Added
+
+- `AIWG_CONFIG_LAYERS` reads MCP servers and profiles from several configuration directories, lowest
+  precedence first, so an organisation base and a per-identity overlay can be kept apart. Writes go to
+  the last directory only. Profiles gain `extends` (`aiwg mcp profile add --extends`), resolved across
+  layers by `aiwg mcp inject --profile`, including `--ephemeral`.
+
 ### Fixed
 
 - `aiwg mcp inject --provider claude` and `aiwg mcp install claude` now write project MCP servers to

@@ -1,3 +1,4 @@
+import { isLowerLayerEntry, loadLayered, resolveConfigLayers, writeLayerData } from './config-layers.mjs';
 import { manageOmpMcp } from './omp-config.mjs';
 import { manageGrokBuildMcp } from './grok-build-config.mjs';
 import { replaceServer } from './toml-editor.mjs';
@@ -127,8 +128,13 @@ export class McpServerRegistry {
   private readonly configDir: string;
   private cache: McpRegistryData | null = null;
 
+  /** Configuration layers, lowest precedence first; null for a single directory */
+  private readonly layers: string[] | null;
+  private layering: { lower: Map<string, string>; own: Set<string> } | null = null;
+
   constructor(configDirOverride?: string) {
-    this.configDir = resolveConfigDir(configDirOverride);
+    this.layers = resolveConfigLayers(configDirOverride);
+    this.configDir = this.layers ? this.layers[this.layers.length - 1] : resolveConfigDir(configDirOverride);
   }
 
   /** Get the registry file path */
@@ -139,6 +145,13 @@ export class McpServerRegistry {
   /** Load the registry from disk */
   async load(): Promise<McpRegistryData> {
     if (this.cache) return this.cache;
+
+    if (this.layers) {
+      const layered = await loadLayered(this.layers, REGISTRY_FILENAME, 'servers', DEFAULT_REGISTRY);
+      this.cache = layered.data;
+      this.layering = layered.layering;
+      return this.cache!;
+    }
 
     const filePath = this.getPath();
     try {
@@ -161,7 +174,7 @@ export class McpServerRegistry {
     if (!this.cache) return;
     await mkdir(this.configDir, { recursive: true });
     const filePath = this.getPath();
-    await writeFile(filePath, JSON.stringify(this.cache, null, 2) + '\n', 'utf-8');
+    await writeFile(filePath, JSON.stringify(this.layering ? writeLayerData(this.cache, 'servers', this.layering) : this.cache, null, 2) + '\n', 'utf-8');
   }
 
   /** Add a new MCP server definition */
@@ -191,6 +204,9 @@ export class McpServerRegistry {
       throw new Error(`Server "${name}" not found.`);
     }
 
+    if (this.layering && isLowerLayerEntry(this.layering, name)) {
+      throw new Error(`Server "${name}" is defined in a lower configuration layer; remove it there.`);
+    }
     delete data.servers[name];
     await this.save();
   }
