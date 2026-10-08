@@ -15,7 +15,7 @@
  * @implements #892
  */
 
-import { readFile, writeFile, mkdir, symlink, access, readdir, chmod } from 'fs/promises';
+import { readFile, mkdir, symlink, access, readdir, chmod } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { existsSync } from 'fs';
@@ -23,6 +23,8 @@ import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { buildServerToml, type McpServerDefinition } from '../registry.js';
 import { assertCredentialPolicy, type McpCredentialPolicy } from '../credentials.mjs';
 import { planToolFilters, type ToolFilters } from '../tool-filters.mjs';
+import { assertConfigDestination, writeConfigAtomic } from '../config-file.mjs';
+import { stripMcpServers } from '../toml-strip-mcp.mjs';
 
 // ─────────────────────────────────────────────
 // Types
@@ -63,6 +65,9 @@ function runtimeHomesDir(): string {
 }
 
 function runtimeHomePath(profile: string): string {
+  if (!/^[a-z0-9-]+$/.test(profile)) {
+    throw new Error('Invalid profile name. Names must match [a-z0-9-]+.');
+  }
   return join(runtimeHomesDir(), profile);
 }
 
@@ -74,6 +79,16 @@ function runtimeConfigPath(profile: string): string {
 // Runtime home management
 // ─────────────────────────────────────────────
 
+async function ensurePrivateRuntimeHome(profile: string): Promise<string> {
+  const rtHome = runtimeHomePath(profile);
+  // The global .codex home may be managed by a dotfile symlink. Refuse
+  // symlinks below it, including roles-runtime, the profile, and config.
+  await assertConfigDestination(runtimeConfigPath(profile), codexHome());
+  await mkdir(rtHome, { recursive: true, mode: 0o700 });
+  await chmod(rtHome, 0o700);
+  return rtHome;
+}
+
 /**
  * Ensure the runtime home directory exists for a profile.
  * Creates the directory and sets up shared-state symlinks.
@@ -83,9 +98,7 @@ export async function ensureRuntimeHome(
   profile: string,
   policy: SharedStatePolicy = DEFAULT_SHARED_STATE,
 ): Promise<string> {
-  const rtHome = runtimeHomePath(profile);
-
-  await mkdir(rtHome, { recursive: true });
+  const rtHome = await ensurePrivateRuntimeHome(profile);
 
   const globalHome = codexHome();
 
@@ -116,7 +129,7 @@ export async function ensureRuntimeHome(
 
 /**
  * Write a profile-scoped config.toml into the runtime home.
- * Strips all [mcp_servers.*] blocks from any existing global config.toml
+ * Strips the entire mcp_servers subtree from any existing global config.toml
  * and writes only the profile's servers.
  */
 export async function writeProfileConfig(
@@ -128,20 +141,18 @@ export async function writeProfileConfig(
   const toolPlan = options.toolFilters
     ? planToolFilters('codex', servers.map((server) => server.name), options.toolFilters)
     : null;
-  const rtHome = runtimeHomePath(profile);
-  await mkdir(rtHome, { recursive: true });
+  await ensurePrivateRuntimeHome(profile);
 
   // Load global config.toml as base (strip existing mcp_servers blocks)
   let baseConfig = '';
   const globalConfigPath = join(codexHome(), 'config.toml');
   try {
     const raw = await readFile(globalConfigPath, 'utf-8');
-    // Remove all [mcp_servers.*] sections and their content
-    baseConfig = raw
-      .replace(/\[mcp_servers\.[^\]]+\][\s\S]*?(?=\n\[|\s*$)/g, '')
-      .trimEnd();
-  } catch {
-    // No global config — start empty
+    baseConfig = stripMcpServers(raw).trimEnd();
+  } catch (error) {
+    // Only a missing global config permits an empty base. Classification and
+    // read errors must never silently copy or replace a previous config.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 
   // Build profile-specific [mcp_servers.*] TOML sections
@@ -154,8 +165,7 @@ export async function writeProfileConfig(
     '\n';
 
   const configPath = runtimeConfigPath(profile);
-  await writeFile(configPath, configContent, { encoding: 'utf-8', mode: 0o600 });
-  await chmod(configPath, 0o600);
+  await writeConfigAtomic(configPath, configContent, { userScope: true, projectRoot: codexHome() });
   return toolPlan?.warnings ?? [];
 }
 

@@ -7,12 +7,13 @@ interface CredentialBearingServer {
   headers?: Record<string, string>;
   headerEnv?: Record<string, string>;
   envFrom?: Record<string, string>;
-  auth?: { clientSecret?: string };
-  oauth?: { clientSecret?: string };
+  auth?: { clientSecret?: string; tokenUrl?: string; redirectUri?: string; resource?: string };
+  oauth?: { clientSecret?: string; tokenUrl?: string; redirectUri?: string; resource?: string };
 }
 
 export const ENV_REFERENCE_SYNTAX: Readonly<Record<string, string | null>>;
 export const CREDENTIAL_POLICIES: readonly McpCredentialPolicy[];
+export function urlCarriesUserinfo(url?: string): boolean;
 export function validateEnvReferenceName(name: string): void;
 export function renderCredentialMaps(
   server: CredentialBearingServer,
