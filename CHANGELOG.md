@@ -14,6 +14,8 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
   does not read, so injected servers never loaded. `--scope user` writes `~/.claude.json`. HTTP and SSE
   entries now carry `type`, without which Claude Code skips a `url` entry. `--ephemeral` output now uses
   each provider's own entry shape instead of a generic one.
+  Project-scope injection of literal env or header values now warns, naming only the keys, because
+  `.mcp.json` is meant to be committed.
 
 ## [2026.10.1] - 2026-10-05 - "Turnkey Jev decision offload"
 
