@@ -1,3 +1,4 @@
+import { assertConfigDestination, assertProjectCredentials, isUserMcpScope, writeConfigAtomic } from './config-file.mjs';
 import { manageOmpMcp } from './omp-config.mjs';
 import { manageGrokBuildMcp } from './grok-build-config.mjs';
 import { replaceServer } from './toml-editor.mjs';
@@ -351,9 +352,15 @@ export async function injectServers(registry, provider, options = {}) {
     return result;
   }
 
+  const userScope = isUserMcpScope(provider, options.scope);
+  const projectRoot = userScope ? undefined : projectDir;
+  await assertConfigDestination(configPath, projectRoot);
+  if (normalizedProvider === 'claude-code' && options.scope !== 'user') {
+    assertProjectCredentials(allServers, configPath);
+  }
   if (normalizedProvider === 'omp') {
     try {
-      const managed = await manageOmpMcp(configPath, allServers, { dryRun });
+      const managed = await manageOmpMcp(configPath, allServers, { dryRun, userScope, projectRoot });
       if (!dryRun) for (const server of allServers) await registry.recordInjection(server.name, 'omp');
       return { ...result, ...managed };
     } catch (error) {
@@ -365,6 +372,7 @@ export async function injectServers(registry, provider, options = {}) {
     try {
       const managed = await manageGrokBuildMcp(configPath, allServers, {
         dryRun,
+        userScope,
         root: options.scope === 'user'
           ? dirname(dirname(configPath))
           : resolve(projectDir),
@@ -380,13 +388,13 @@ export async function injectServers(registry, provider, options = {}) {
   }
 
   if (mcpDefinition?.configFormat === 'toml') {
-    return injectToml(registry, allServers, configPath, provider, dryRun, result);
+    return injectToml(registry, allServers, configPath, provider, dryRun, result, userScope, projectRoot);
   }
 
-  return injectJson(registry, allServers, configPath, provider, dryRun, result);
+  return injectJson(registry, allServers, configPath, provider, dryRun, result, userScope, projectRoot);
 }
 
-async function injectJson(registry, servers, configPath, provider, dryRun, result) {
+async function injectJson(registry, servers, configPath, provider, dryRun, result, userScope, projectRoot) {
   let existing = {};
   try {
     const content = await readFile(configPath, 'utf-8');
@@ -421,8 +429,7 @@ async function injectJson(registry, servers, configPath, provider, dryRun, resul
   const merged = { ...existing, [mcpKey]: newServers };
 
   if (!dryRun) {
-    await mkdir(resolve(configPath, '..'), { recursive: true });
-    await writeFile(configPath, JSON.stringify(merged, null, 2) + '\n', 'utf-8');
+    await writeConfigAtomic(configPath, JSON.stringify(merged, null, 2) + '\n', { userScope, projectRoot });
 
     for (const server of servers) {
       if (normalizeRuntimeProviderId(provider) === 'antigravity' && !result.serversInjected.includes(server.name)) continue;
@@ -433,7 +440,7 @@ async function injectJson(registry, servers, configPath, provider, dryRun, resul
   return result;
 }
 
-async function injectToml(registry, servers, configPath, provider, dryRun, result) {
+async function injectToml(registry, servers, configPath, provider, dryRun, result, userScope, projectRoot) {
   let existing = '';
   try {
     existing = await readFile(configPath, 'utf-8');
@@ -449,8 +456,7 @@ async function injectToml(registry, servers, configPath, provider, dryRun, resul
   }
 
   if (!dryRun) {
-    await mkdir(resolve(configPath, '..'), { recursive: true });
-    await writeFile(configPath, existing, 'utf-8');
+    await writeConfigAtomic(configPath, existing, { userScope, projectRoot });
 
     for (const server of servers) {
       await registry.recordInjection(server.name, provider);
