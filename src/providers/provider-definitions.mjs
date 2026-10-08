@@ -178,6 +178,9 @@ export function listMcpInjectProviderIds() {
 }
 
 export function resolveMcpConfigPath(provider, projectDir = '.', options = {}) {
+  if (normalizeRuntimeProviderId(provider) === 'codex' && process.env.CODEX_HOME) {
+    return resolve(process.env.CODEX_HOME, 'config.toml');
+  }
   if (normalizeRuntimeProviderId(provider) === 'antigravity' && options.scope === 'user') {
     const home = process.env.HOME || process.env.USERPROFILE || homedir();
     return resolve(home, '.gemini/config/mcp_config.json');

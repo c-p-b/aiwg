@@ -4,4 +4,18 @@ export function assertConfigDestination(file: string, projectRoot?: string): Pro
 export function isUserMcpScope(provider: string, scope?: string): boolean;
 export function assertProjectCredentials(servers: Array<{ name: string; url?: string; env?: Record<string, string>; headers?: Record<string, string> }>, configPath: string): void;
 export function assertConfigObject(config: unknown, serversKey: string): void;
-export function writeConfigAtomic(file: string, content: string, options?: { userScope?: boolean; projectRoot?: string }): Promise<void>;
+export interface ConfigWriteOptions {
+  userScope?: boolean;
+  projectRoot?: string;
+  newFileMode?: number;
+  mode?: number;
+}
+export interface ConfigWrite {
+  file: string;
+  content: string | Uint8Array;
+  options?: ConfigWriteOptions;
+}
+export function writeConfigAtomic(file: string, content: string | Uint8Array, options?: ConfigWriteOptions): Promise<void>;
+export function canonicalConfigPath(file: string): Promise<string>;
+export function prepareConfigWrite(file: string, options?: ConfigWriteOptions): Promise<void>;
+export function writeConfigTransaction(writes: ConfigWrite[]): Promise<void>;

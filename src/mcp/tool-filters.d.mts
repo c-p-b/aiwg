@@ -1,3 +1,5 @@
+import type { ConfigWrite } from './config-file.mjs';
+
 export interface ToolFilters {
   deny: string[];
   allow: string[];
@@ -24,8 +26,21 @@ export function applyJsonToolFilterPlan(
   plan: ToolFilterPlan,
 ): Record<string, unknown>;
 export function claudeSettingsPath(projectDir?: string, scope?: 'user' | 'project'): string;
+export interface ClaudePermissionOptions {
+  dryRun?: boolean;
+  userScope?: boolean;
+  projectRoot?: string;
+  managedDir?: string;
+  sidecar?: boolean;
+  mcpPath?: string;
+}
+export function prepareClaudePermissions(
+  settingsPath: string,
+  permissions: { deny: string[]; allow: string[] },
+  options?: ClaudePermissionOptions,
+): Promise<{ merged: Record<string, unknown>; active: boolean; warnings: string[]; writes: ConfigWrite[]; commit(): Promise<void> }>;
 export function mergeClaudePermissions(
   settingsPath: string,
   permissions: { deny: string[]; allow: string[] },
-  options?: { dryRun?: boolean },
+  options?: ClaudePermissionOptions,
 ): Promise<Record<string, unknown>>;

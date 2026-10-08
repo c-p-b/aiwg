@@ -15,6 +15,16 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
   `disabled_tools`/`enabled_tools`, opencode its `tools` map, and Factory, Windsurf and Antigravity
   `disabledTools`. A filter a provider cannot express is printed as a warning. `aiwg mcp profile add`
   and `edit` accept `--tool-deny`, `--tool-allow`, `--provider` and `--clear-tool-filters`.
+- Claude profile sessions now launch with both `--mcp-config` and the permission sidecar via `--settings`.
+- Claude `toolAllow` is refused with the offending patterns: allow rules pre-approve tools and cannot
+  express a restrict-only allowlist or carve exceptions out of deny rules. `toolDeny` remains supported.
+  Maintainers can remove these entries or scope allowlists to supported providers.
+- Persistent Claude injection tracks added deny rules outside Claude settings, removes obsolete managed
+  rules on profile switches or `--clear-tool-filters` plus re-injection, and preserves user rules.
+- Claude settings reject symlinks and unrelated sidecar collisions, validate before MCP writes or receipts,
+  and use private modes for new project settings, user settings and ephemeral sidecars.
+- Filters now apply to preserved Antigravity servers; opencode rules retain last-match precedence over
+  existing wildcards on reinjection.
 - `aiwg mcp inject` renders `--header-env` references in each harness's own syntax, and a new
   `--env-from NAME=VAR` does the same for stdio server variables. Previously only OMP and Grok Build
   rendered references; Claude Code, Cursor, Windsurf, Factory and opencode dropped them, and Codex
@@ -26,6 +36,17 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
 
 ### Fixed
 
+- Claude profile settings preserve uncertain deny-rule ownership after manual edits, with a deny-array
+  digest, tracked preservation and actionable warnings. Ownership follows realpath parent aliases;
+  invalid records explain how to reset tracking. New project settings use `0600` and retain existing modes.
+- MCP, Claude settings and ownership writes preflight their destinations and roll back earlier files
+  on a reported write failure. Sessions consume the reported sidecar path and refuse missing settings.
+- Direct Claude permission APIs refuse allowlists; preserved Antigravity filters reject non-array values.
+  OpenCode emits deny keys before allow keys while keeping identical allow/deny keys denied.
+  Codex warns when a per-server allowlist leaves other servers unrestricted.
+- Codex config resolution honors `CODEX_HOME`, including installation and isolated profile launch/login.
+  Persistent-rendering and hook-bridge tests isolate home resolution to protect the operator's real config.
+  Codex hook translation also honors `CODEX_HOME`.
 - Codex profile sessions stop before runtime setup or launch on credential-policy refusal.
   Runtime configs remove the entire global `mcp_servers` subtree, including inline, dotted,
   quoted, and array-table forms, and refuse malformed base TOML. Runtime homes use `0700`;

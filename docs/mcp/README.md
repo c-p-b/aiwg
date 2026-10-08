@@ -135,22 +135,76 @@ aiwg mcp profile edit dev --provider codex --clear-tool-filters
 ```
 
 `aiwg mcp inject --profile <p>` renders the filters into each provider's own setting. Anything a
-provider cannot express is printed as a `WARNING` line on stderr; it is not applied.
+provider cannot express is printed as a `WARNING` line on stderr; it is not applied. Claude Code
+`toolAllow` is refused, as described below.
 
 | Provider | toolDeny | toolAllow | Globs |
 | --- | --- | --- | --- |
-| Claude Code | `permissions.deny`: `mcp__<server>__<tool>` | `permissions.allow` (pre-approval) | yes |
+| Claude Code | `permissions.deny`: `mcp__<server>__<tool>` | refused (no restrict-only allowlist) | yes |
 | Codex | `disabled_tools`; `enabled = false` for `<server>__*` | `enabled_tools` | no |
 | opencode | `tools` map entry `<server>_<tool>: false` | `<server>_*: false`, then each tool `true` | yes |
 | Factory, Antigravity | `disabledTools`; `disabled: true` for `<server>__*` | not supported | no |
 | Windsurf | `disabledTools` | not supported | no |
 | Cursor, Warp, OMP, Grok Build | not supported | not supported | |
 
-Claude Code reads permission rules from settings, not from the MCP file: persistent injection adds
-them to `.claude/settings.local.json` (`~/.claude/settings.json` with `--scope user`) and keeps the
-rules already there. `--ephemeral --out run.json` also writes `run.settings.json` and prints
-`claude --mcp-config run.json --settings run.settings.json`. `aiwg session --provider codex
---profile <p>` writes the Codex filters into the profile's runtime config.
+`toolAllow` is per-server. Only servers named in an allow pattern enter allowlist mode; other
+servers remain unrestricted by `toolAllow` and still receive any `toolDeny` rules. Codex warns
+with their names. To restrict every server, list allowed tools for every server or use
+`toolDeny: ["<server>__*"]` for servers that should be disabled.
+
+Claude Code reads deny rules from settings, not from the MCP file. Persistent injection uses
+`.claude/settings.local.json` (`~/.claude/settings.json` with `--scope user`). AIWG tracks the deny
+rules it actually added in private `claude-tool-permissions/<path-hash>.json` records in the AIWG
+config directory. The hash uses the settings parent directory's realpath plus the basename, so
+project and dotfile aliases share ownership. Records also store a digest of `permissions.deny`,
+independent of the rest of the settings file. When this array is unchanged, switching profiles
+removes obsolete managed rules; `--clear-tool-filters` followed by re-injection removes them all.
+If the array changed or a legacy record has no deny digest, AIWG preserves uncertain rules, keeps
+tracking them, and warns with their names and the settings path. Later injections keep those rules;
+remove them manually from `permissions.deny` when no longer wanted. Pre-existing user rules never
+become managed, including identical deny rules. Unrelated settings changes do not prevent cleanup.
+Keep ownership records across runs; deleting a record resets ownership and treats remaining rules
+as user-owned. Invalid-record diagnostics name the record path and explain this reset.
+
+Claude Code has no restrict-only allowlist: `permissions.allow` pre-approves tools rather than
+restricting availability. Deny rules cannot express "all except", and allow rules cannot carve
+exceptions out of deny rules. See [Claude Code permissions](https://code.claude.com/docs/en/permissions).
+Injection, ephemeral injection and profile sessions therefore refuse any resolved Claude `toolAllow`
+entries, including those inherited from `*`, and name the offending patterns. `toolDeny` still works.
+Maintainers can remove these allow entries or scope them to providers with true allowlists; explicit
+pre-approval remains a separate choice in Claude's own settings.
+
+`--ephemeral --out run.json` writes `run.settings.json` for Claude deny rules and prints
+`claude --mcp-config run.json --settings run.settings.json`. Claude profile sessions use the path
+reported by injection and check that it exists before passing `--settings`; a missing expected
+sidecar refuses launch. Settings destinations reject a symlinked file. For project writes, AIWG
+also checks directories between the project root and file; the root itself may be a symlink.
+User settings may use a symlinked `~/.claude` directory. Explicit ephemeral output paths check
+parents from the filesystem root. The remaining parent-swap window between the final check and
+rename is residual, as with other MCP config writes.
+
+An implicit sidecar must be absent or an unchanged AIWG-created sidecar; it cannot overwrite an
+unrelated file or share the MCP file's destination. Choose another `--out` path to resolve a
+collision. New project settings, user settings and ephemeral files use mode `0600`; existing
+project settings retain their mode. Settings JSON, its object root, permission object and rule
+arrays are validated, and the ownership-record directory is checked for write access before
+configuration writes. MCP config, settings and ownership records are written in that order;
+a failed write restores earlier files and their modes, or removes outputs that did not exist.
+This rollback handles reported write failures; it is not a crash-atomic transaction.
+
+OpenCode uses the last matching tool rule. On each injection AIWG's keys follow existing keys,
+with deny keys first and allow keys afterward. Explicit allows therefore override matching
+wildcard denies; an identical allow/deny key stays denied. Preserved Antigravity server entries
+receive profile filters while keeping their launch configuration. A non-array existing
+`disabledTools` is refused with a diagnostic.
+
+OpenCode `tools` keys and Antigravity `disabledTools` from an earlier profile are not tracked or
+removed when switching profiles. Remove obsolete keys or disabled tools manually before switching
+if they should no longer apply; Antigravity unions new disabled tools with the preserved array.
+
+`aiwg session --provider codex --profile <p>` writes Codex filters into the profile's runtime config.
+Persistent injection, installation and hook translation honor `CODEX_HOME` (default `~/.codex`); profile launches
+set both `HOME` and `CODEX_HOME` to the isolated runtime home.
 
 ## Credentials in Injected Servers
 

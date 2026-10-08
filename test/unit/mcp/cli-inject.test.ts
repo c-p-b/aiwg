@@ -172,7 +172,7 @@ describe("aiwg mcp inject --provider claude", () => {
     symlinkSync(target, out);
     const result = runCliWithOutput(["inject", "--provider", "claude", "--ephemeral", "--out", out]);
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("Refusing to write ephemeral MCP config to symbolic link");
+    expect(result.stderr).toContain("destination is a symlink");
     expect(readFileSync(target, "utf-8")).toBe("untouched");
     expect(lstatSync(out).isSymbolicLink()).toBe(true);
   });

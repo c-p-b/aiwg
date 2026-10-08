@@ -72,6 +72,8 @@ const registryImplementations: { implementation: string; create: (directory: str
   // Exercise the common public API, not either implementation's private fields.
   { implementation: "runtime", create: directory => new RuntimeMcpServerRegistry(directory) as RegistryContract },
 ];
+beforeEach(() => vi.stubEnv("CODEX_HOME", ""));
+afterEach(() => vi.unstubAllEnvs());
 describe.each(registryImplementations)("$implementation McpServerRegistry", ({ create }) => {
   let tempDir: string;
   let registry: RegistryContract;

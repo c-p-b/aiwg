@@ -1,9 +1,9 @@
-import { assertConfigDestination, assertProjectCredentials, isUserMcpScope, writeConfigAtomic } from './config-file.mjs';
+import { assertConfigDestination, assertProjectCredentials, isUserMcpScope, writeConfigAtomic, writeConfigTransaction } from './config-file.mjs';
 import { manageOmpMcp } from './omp-config.mjs';
 import { manageGrokBuildMcp } from './grok-build-config.mjs';
 import { replaceServer } from './toml-editor.mjs';
 import { resolveOmpPaths } from '../providers/omp-paths.mjs';
-import { applyJsonToolFilterPlan, claudeSettingsPath, mergeClaudePermissions, planToolFilters, type ToolFilterPlan, type ToolFilters } from './tool-filters.mjs';
+import { applyJsonToolFilterPlan, claudeSettingsPath, prepareClaudePermissions, planToolFilters, type ToolFilterPlan, type ToolFilters } from './tool-filters.mjs';
 import { assertCredentialPolicy, renderCredentialMaps, validateEnvReferenceName, type McpCredentialPolicy } from './credentials.mjs';
 /**
  * MCP Server Registry
@@ -490,8 +490,8 @@ export function getProviderConfigPath(provider: InjectProvider, projectDir = '.'
     claude: resolve(projectDir, '.mcp.json'),
     cursor: resolve(projectDir, '.cursor/mcp.json'),
     factory: resolve(homeDir, '.factory/mcp.json'),
-    codex: resolve(homeDir, '.codex/config.toml'),
-    openai: resolve(homeDir, '.codex/config.toml'),
+    codex: process.env.CODEX_HOME ? resolve(process.env.CODEX_HOME, 'config.toml') : resolve(homeDir, '.codex/config.toml'),
+    openai: process.env.CODEX_HOME ? resolve(process.env.CODEX_HOME, 'config.toml') : resolve(homeDir, '.codex/config.toml'),
     'grok-build': options.scope === 'user'
       ? resolve(process.env.GROK_HOME || resolve(homeDir, '.grok'), 'config.toml')
       : resolve(projectDir, '.grok/config.toml'),
@@ -536,15 +536,15 @@ export async function injectServers(
     allServers = allServers.filter(s => serverFilter.includes(s.name));
   }
 
+  const toolPlan = options.toolFilters
+    ? planToolFilters(provider, allServers.map(server => server.name), options.toolFilters)
+    : null;
+  if (toolPlan) result.warnings = toolPlan.warnings;
   if (allServers.length === 0) {
     result.error = 'No servers to inject. Use "aiwg mcp add" first.';
     return result;
   }
 
-  const toolPlan = options.toolFilters
-    ? planToolFilters(provider, allServers.map(server => server.name), options.toolFilters)
-    : null;
-  if (toolPlan) result.warnings = toolPlan.warnings;
   assertCredentialPolicy(allServers, options.credentialPolicy);
 
   const userScope = isUserMcpScope(provider, options.scope);
@@ -637,14 +637,23 @@ async function injectJson(
   // Merge back
   const merged = { ...existing, [mcpKey]: newServers };
   if (toolPlan) {
-    applyJsonToolFilterPlan(merged, mcpKey, {
-      ...toolPlan,
-      serverFields: Object.fromEntries(Object.entries(toolPlan.serverFields).filter(([name]) => result.serversInjected.includes(name))),
-    });
+    applyJsonToolFilterPlan(merged, mcpKey, toolPlan);
   }
 
+  const isClaude = provider === 'claude-code' || provider === 'claude';
+  const settingsPath = isClaude ? claudeSettingsPath(location.projectDir, location.scope) : null;
+  const settings = settingsPath ? await prepareClaudePermissions(
+    settingsPath, toolPlan?.claudePermissions || { deny: [], allow: [] },
+    { userScope, projectRoot, managedDir: dirname(registry.getPath()), mcpPath: configPath },
+  ) : null;
+  if (settings?.active && settingsPath) result.settingsPath = settingsPath;
+  if (settings?.warnings.length) result.warnings = [...(result.warnings || []), ...settings.warnings];
+
   if (!dryRun) {
-    await writeConfigAtomic(configPath, JSON.stringify(merged, null, 2) + '\n', { userScope, projectRoot });
+    await writeConfigTransaction([
+      { file: configPath, content: JSON.stringify(merged, null, 2) + '\n', options: { userScope, projectRoot } },
+      ...(settings?.writes || []),
+    ]);
 
     // Record injection in registry
     for (const server of servers) {
@@ -654,11 +663,6 @@ async function injectJson(
   }
 
 
-  if (toolPlan?.claudePermissions) {
-    const settingsPath = claudeSettingsPath(location.projectDir, location.scope);
-    await mergeClaudePermissions(settingsPath, toolPlan.claudePermissions, { dryRun });
-    result.settingsPath = settingsPath;
-  }
   return result;
 }
 

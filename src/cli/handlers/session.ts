@@ -19,6 +19,7 @@
  */
 
 import { spawnSync } from 'child_process';
+import { existsSync } from 'node:fs';
 import { CommandHandler, HandlerContext, HandlerResult } from './types.js';
 import { ensureRuntimeHome, writeProfileConfig, launchWithProfile } from '../../mcp/adapters/codex-runtime.js';
 import { getFrameworkRoot } from '../../channel/manager.mjs';
@@ -249,16 +250,22 @@ function injectMcp(provider: string, cwd: string): boolean {
  * Profile-aware inject (#891).
  * Default is ephemeral (no persistent config mutation).
  *
- * For Claude: returns the ephemeral config path (for claude --mcp-config).
+ * For Claude: returns the ephemeral MCP config and permission settings paths.
  * For Codex: sets up the runtime home via the codex-runtime adapter (#892).
  * Returns null for persistent mode or on failure.
  */
+interface EphemeralProfileConfig {
+  mcpConfigPath: string;
+  settingsPath: string | null;
+}
+
 function injectMcpProfile(
   provider: string,
   profileName: string,
   cwd: string,
   persist: boolean,
-): string | null {
+  hasClaudePermissions = false,
+): EphemeralProfileConfig | null {
   console.log(`\n  Resolving profile "${profileName}" for ${provider}...`);
 
   if (persist) {
@@ -269,8 +276,8 @@ function injectMcpProfile(
       { stdio: 'inherit', cwd },
     );
     if (result.status !== 0) {
-      if (provider === 'codex' || provider === 'openai') {
-        throw new Error('Codex profile injection failed; refusing to launch.');
+      if (provider === 'codex' || provider === 'openai' || provider === 'claude' || provider === 'claude-code') {
+        throw new Error(`${provider} profile injection failed; refusing to launch.`);
       }
       console.warn('  WARN  Profile inject failed — continuing without profile.');
     }
@@ -295,15 +302,29 @@ function injectMcpProfile(
       '--ephemeral',
       '--out', tmpPath,
     ],
-    { stdio: 'inherit', cwd },
+    { stdio: ['inherit', 'pipe', 'inherit'], encoding: 'utf-8', cwd },
   );
 
+  if (result.stdout) process.stdout.write(result.stdout);
+
   if (result.status !== 0) {
+    if (provider === 'claude' || provider === 'claude-code') {
+      throw new Error('Claude profile injection failed; refusing to launch.');
+    }
     console.warn('  WARN  Ephemeral profile inject failed — launching without profile MCP config.');
     return null;
   }
 
-  return tmpPath;
+  const reportedSettingsPath = result.stdout?.match(/^\s*Tool permissions: (.+)$/m)?.[1]?.trim();
+  const settingsPath = reportedSettingsPath && existsSync(reportedSettingsPath) ? reportedSettingsPath : null;
+  if (hasClaudePermissions && !settingsPath) {
+    throw new Error('Claude profile permission settings were not generated; refusing to launch.');
+  }
+
+  return {
+    mcpConfigPath: tmpPath,
+    settingsPath,
+  };
 }
 
 // ── Launch ────────────────────────────────────────────────────────────────────
@@ -317,6 +338,7 @@ function launchProvider(
   mcpInjected: boolean,
   mcpConfigPath?: string | null,
   profile?: string | null,
+  settingsPath?: string | null,
 ): HandlerResult {
   const cfg = getProviderConfig(provider);
 
@@ -347,11 +369,15 @@ ${cfg.guidanceMessage ?? `Open ${cfg.name} in your project directory to begin.`}
     return { exitCode: result.status ?? 0 };
   }
 
-  // Claude: if we have an ephemeral MCP config, pass it via --mcp-config
+  // Claude: load both the ephemeral MCP config and any permission settings.
   const binaryArgs: string[] = [];
   if (mcpConfigPath && (provider === 'claude' || provider === 'claude-code')) {
     binaryArgs.push('--mcp-config', mcpConfigPath);
     console.log(`  Using ephemeral MCP config: ${mcpConfigPath}`);
+    if (settingsPath) {
+      binaryArgs.push('--settings', settingsPath);
+      console.log(`  Using ephemeral permission settings: ${settingsPath}`);
+    }
   }
 
   const result = spawnSync(cfg.binary!, binaryArgs, {
@@ -417,6 +443,7 @@ export const sessionHandler: CommandHandler = {
     // ── Step 4: MCP inject ────────────────────────────────────────
     let mcpInjected = false;
     let mcpConfigPath: string | null = null;
+    let settingsPath: string | null = null;
 
     if (profile) {
       // Profile-aware injection (#891) — ephemeral by default
@@ -459,8 +486,27 @@ export const sessionHandler: CommandHandler = {
           return { exitCode: 1 };
         }
       } else {
-        mcpConfigPath = injectMcpProfile(provider, profile, cwd, persist);
-        mcpInjected = mcpConfigPath !== null || persist;
+        try {
+          let hasClaudePermissions = false;
+          if (provider === 'claude' || provider === 'claude-code') {
+            const { McpProfileRegistry } = await import('../../mcp/profiles.js');
+            const { McpServerRegistry } = await import('../../mcp/registry.js');
+            const { resolveToolFilters, planToolFilters } = await import('../../mcp/tool-filters.mjs');
+            const profiles = new McpProfileRegistry();
+            const servers = await profiles.resolveServers(profile, new McpServerRegistry()) as
+              import('../../mcp/registry.js').McpServerDefinition[];
+            const plan = planToolFilters(provider, servers.map(server => server.name),
+              resolveToolFilters(await profiles.get(profile), provider));
+            hasClaudePermissions = plan.claudePermissions !== null;
+          }
+          const ephemeral = injectMcpProfile(provider, profile, cwd, persist, hasClaudePermissions);
+          mcpConfigPath = ephemeral?.mcpConfigPath ?? null;
+          settingsPath = ephemeral?.settingsPath ?? null;
+          mcpInjected = ephemeral !== null || persist;
+        } catch (err) {
+          console.error(`  ${err instanceof Error ? err.message : String(err)}`);
+          return { exitCode: 1 };
+        }
       }
     } else if (mcp) {
       mcpInjected = injectMcp(provider, cwd);
@@ -468,6 +514,6 @@ export const sessionHandler: CommandHandler = {
 
     // ── Step 5: Launch ────────────────────────────────────────────
     return launchProvider(provider, mcpInjected, mcpConfigPath,
-      persist && (provider === 'codex' || provider === 'openai') ? null : profile);
+      persist && (provider === 'codex' || provider === 'openai') ? null : profile, settingsPath);
   },
 };

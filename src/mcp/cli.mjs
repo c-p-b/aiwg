@@ -7,7 +7,7 @@
  */
 
 import { startServer, createServer } from './server.mjs';
-import { assertConfigDestination, assertConfigObject, assertProjectCredentials, isUserMcpScope, writeConfigAtomic } from './config-file.mjs';
+import { assertConfigDestination, assertConfigObject, assertProjectCredentials, isUserMcpScope, writeConfigAtomic, writeConfigTransaction } from './config-file.mjs';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -24,6 +24,7 @@ import {
   applyJsonToolFilterPlan,
   hasToolFilters,
   planToolFilters,
+  prepareClaudePermissions,
   resolveToolFilters,
 } from './tool-filters.mjs';
 import { assertCredentialPolicy, CREDENTIAL_POLICIES, resolveCredentialPolicy } from './credentials.mjs';
@@ -179,7 +180,7 @@ async function generateConfig(target, projectDir = '.', scope = 'project') {
     },
     codex: {
       // Codex stores config in ~/.codex/config.toml (TOML format)
-      path: path.join(homeDir, '.codex/config.toml'),
+      path: path.resolve(process.env.CODEX_HOME || path.join(homeDir, '.codex'), 'config.toml'),
       userScope: true,
       // We generate TOML snippet to append, not JSON
       content: null,
@@ -230,7 +231,7 @@ enabled_tools = [
     },
     openai: {
       // Alias for codex
-      path: path.join(homeDir, '.codex/config.toml'),
+      path: path.resolve(process.env.CODEX_HOME || path.join(homeDir, '.codex'), 'config.toml'),
       userScope: true,
       alias: 'codex'
     },
@@ -831,6 +832,9 @@ async function handleInject(args) {
       const servers = serverFilter
         ? allServers.filter(s => serverFilter.includes(s.name))
         : allServers;
+      const toolPlan = hasToolFilters(toolFilters)
+        ? planToolFilters(p, servers.map(server => server.name), toolFilters)
+        : null;
 
       if (servers.length === 0) {
         console.error(`  ${p}: no servers to write`);
@@ -855,6 +859,7 @@ async function handleInject(args) {
       if (Object.keys(mcpBlock).length === 0) continue;
 
       const config = { [mcpKey]: mcpBlock };
+      if (toolPlan) applyJsonToolFilterPlan(config, mcpKey, toolPlan);
       const tempDir = outPath || dryRun
         ? undefined
         : await fs.mkdtemp(path.join(os.tmpdir(), 'aiwg-mcp-'));
@@ -863,40 +868,35 @@ async function handleInject(args) {
         `${profileName ?? 'custom'}-${p}.json`,
       );
 
-      const toolPlan = hasToolFilters(toolFilters) ? planToolFilters(p, Object.keys(mcpBlock), toolFilters) : null;
-      if (toolPlan) applyJsonToolFilterPlan(config, mcpKey, toolPlan);
       // Claude Code reads permission rules from settings, not from --mcp-config.
       const settingsPath = toolPlan?.claudePermissions ? targetPath.replace(/(\.json)?$/, '.settings.json') : null;
+      // Explicit --out paths may be outside the project. Check every parent from
+      // the filesystem root so neither destination can traverse a symlink.
+      const outputRoot = path.parse(path.resolve(targetPath)).root;
+      await assertConfigDestination(targetPath, outputRoot);
+      const preparedPermissions = settingsPath
+        ? await prepareClaudePermissions(settingsPath, toolPlan.claudePermissions, {
+          projectRoot: outputRoot,
+          userScope: true,
+          managedDir: path.dirname(registry.getPath()),
+          sidecar: true,
+          mcpPath: targetPath,
+        })
+        : null;
 
       if (!dryRun) {
-        if (outPath) {
-          for (const outputPath of [targetPath, settingsPath].filter(Boolean)) {
-            let stat;
-            try {
-              stat = await fs.lstat(outputPath);
-            } catch (error) {
-              if (error.code !== 'ENOENT') throw error;
-            }
-            if (stat?.isSymbolicLink()) {
-              throw new Error(`Refusing to write ephemeral MCP config to symbolic link: ${outputPath}`);
-            }
-          }
-        }
-        await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        await fs.writeFile(targetPath, JSON.stringify(config, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
-        await fs.chmod(targetPath, 0o600);
-        if (settingsPath) {
-          await fs.writeFile(settingsPath, JSON.stringify({ permissions: toolPlan.claudePermissions }, null, 2) + '\n',
-            { encoding: 'utf-8', mode: 0o600 });
-          await fs.chmod(settingsPath, 0o600);
-        }
+        await writeConfigTransaction([
+          { file: targetPath, content: JSON.stringify(config, null, 2) + '\n',
+            options: { userScope: true, projectRoot: outputRoot } },
+          ...(preparedPermissions?.writes || []),
+        ]);
       }
 
       const prefix = dryRun ? '[DRY RUN] ' : '';
       console.log(`${prefix}${p}: ${targetPath}`);
       console.log(`  ${prefix}Servers: ${Object.keys(mcpBlock).join(', ')}`);
       if (settingsPath) console.log(`  ${prefix}Tool permissions: ${settingsPath}`);
-      printWarnings(toolPlan?.warnings);
+      printWarnings([...(toolPlan?.warnings || []), ...(preparedPermissions?.warnings || [])]);
       if (!dryRun && (p === 'claude-code' || p === 'claude')) {
         console.log(`  Launch with: claude --mcp-config ${targetPath}${settingsPath ? ` --settings ${settingsPath}` : ''}`);
       }
@@ -1316,8 +1316,8 @@ export async function main(args = process.argv.slice(2)) {
           factory: (projectDir === '.' || projectDir === 'global')
             ? path.join(homeDir, '.factory/mcp.json')
             : path.join(projectDir, '.factory/mcp.json'),
-          codex: path.join(homeDir, '.codex/config.toml'),
-          openai: path.join(homeDir, '.codex/config.toml'),
+          codex: path.resolve(process.env.CODEX_HOME || path.join(homeDir, '.codex'), 'config.toml'),
+          openai: path.resolve(process.env.CODEX_HOME || path.join(homeDir, '.codex'), 'config.toml'),
           vscode: '.vscode/mcp.json',
           copilot: '.vscode/mcp.json',
           opencode: (projectDir === '.' || projectDir === 'global')

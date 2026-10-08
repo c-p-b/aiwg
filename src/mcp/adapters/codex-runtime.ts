@@ -4,10 +4,10 @@
  * Codex has no native per-session config flag (unlike `claude --mcp-config`).
  * This adapter implements the sysops `codex-role.sh` pattern:
  *
- *   1. Create ~/.codex/roles-runtime/<profile>/ per profile
+ *   1. Create <CODEX_HOME or ~/.codex>/roles-runtime/<profile>/ per profile
  *   2. Symlink shared state (history, sessions) into the runtime home
  *   3. Write a profile-scoped config.toml (stripped global MCP, only profile servers)
- *   4. Launch with HOME=<runtime-home> codex
+ *   4. Launch with CODEX_HOME=<runtime-home> codex
  *   5. Auth flows execute against the runtime home — OAuth tokens are isolated per profile
  *
  * Reference: roctinam/sysops:scripts/mcp-roles/codex-role.sh
@@ -57,7 +57,7 @@ const DEFAULT_SHARED_STATE: SharedStatePolicy = {
 // ─────────────────────────────────────────────
 
 function codexHome(): string {
-  return join(homedir(), '.codex');
+  return process.env.CODEX_HOME || join(homedir(), '.codex');
 }
 
 function runtimeHomesDir(): string {
@@ -171,7 +171,7 @@ export async function writeProfileConfig(
 
 /**
  * Launch Codex with a profile's runtime home.
- * Sets HOME=<runtime-home> so Codex reads its profile-scoped config and
+ * Sets CODEX_HOME and HOME to the runtime home so Codex reads its profile-scoped config and
  * OAuth tokens are written to the runtime home (isolated from other profiles).
  */
 export function launchWithProfile(
@@ -190,6 +190,7 @@ export function launchWithProfile(
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     HOME: rtHome,
+    CODEX_HOME: rtHome,
   };
 
   return spawnSync('codex', extraArgs, {
@@ -213,6 +214,7 @@ export async function loginInProfile(profile: string): Promise<void> {
     env: {
       ...(process.env as Record<string, string>),
       HOME: rtHome,
+      CODEX_HOME: rtHome,
     },
   });
 
