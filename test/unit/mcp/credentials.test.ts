@@ -8,11 +8,18 @@
  * @source @src/mcp/registry.ts
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { homedir } from "os";
 import { join, resolve } from "node:path";
+import { writeProfileConfig } from "../../../src/mcp/adapters/codex-runtime.js";
+
+vi.mock("os", async importOriginal => {
+  const os = await importOriginal<typeof import("os")>();
+  return { ...os, homedir: vi.fn(() => os.tmpdir()) };
+});
 
 import { buildServerConfig, buildServerToml, type McpServerDefinition, type InjectProvider } from "../../../src/mcp/registry.js";
 import { buildServerConfig as runtimeBuildServerConfig, buildServerToml as runtimeBuildServerToml } from "../../../src/mcp/registry.mjs";
@@ -87,6 +94,38 @@ describe("credential policy", () => {
     expect(resolveCredentialPolicy({ registryPolicy: "references", env: { AIWG_MCP_CREDENTIAL_POLICY: "none" } })).toBe("none");
     expect(resolveCredentialPolicy({ flag: "references", registryPolicy: "none", env: { AIWG_MCP_CREDENTIAL_POLICY: "none" } })).toBe("references");
     expect(() => resolveCredentialPolicy({ flag: "lax", env: {} })).toThrow(/Unknown MCP credential policy/);
+  });
+});
+
+describe("Codex runtime-home config permissions", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "aiwg-codex-runtime-"));
+    vi.stubEnv("HOME", root);
+    vi.stubEnv("USERPROFILE", root);
+    vi.stubEnv("CODEX_HOME", join(root, ".codex"));
+    vi.mocked(homedir).mockReturnValue(root);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it.each([false, true])("writes owner-only config.toml (pre-existing: %s)", async preExisting => {
+    const configPath = join(root, ".codex", "roles-runtime", "test-profile", "config.toml");
+    if (preExisting) {
+      mkdirSync(join(root, ".codex", "roles-runtime", "test-profile"), { recursive: true });
+      writeFileSync(configPath, "old config");
+      if (process.platform !== "win32") chmodSync(configPath, 0o644);
+    }
+    await writeProfileConfig("test-profile", [{
+      name: "remote", type: "http", url: "https://example.test/mcp",
+      headers: { Authorization: "Bearer synthetic" },
+    }]);
+    expect(readFileSync(configPath, "utf-8")).toContain("Bearer synthetic");
+    if (process.platform !== "win32") expect(statSync(configPath).mode & 0o777).toBe(0o600);
   });
 });
 

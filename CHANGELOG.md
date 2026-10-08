@@ -22,7 +22,6 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
 
 - opencode local servers now receive their variables as `environment`, the key opencode reads, instead
   of `env`.
-
 - `aiwg mcp inject --provider claude` and `aiwg mcp install claude` now write project MCP servers to
   `.mcp.json`. They previously wrote `mcpServers` into `.claude/settings.local.json`, which Claude Code
   does not read, so injected servers never loaded. `--scope user` writes `~/.claude.json`. HTTP and SSE
@@ -30,6 +29,8 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
   each provider's own entry shape instead of a generic one.
   Project-scope injection of literal env or header values now warns, naming only the keys, because
   `.mcp.json` is meant to be committed.
+- Ephemeral and Codex runtime-home MCP configs use 0600 permissions; default ephemeral files use a private temp
+  directory, and `aiwg mcp list` redacts URL userinfo.
 
 ## [2026.10.1] - 2026-10-05 - "Turnkey Jev decision offload"
 

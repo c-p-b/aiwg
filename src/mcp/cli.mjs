@@ -9,6 +9,7 @@
 import { startServer, createServer } from './server.mjs';
 import fs from 'fs/promises';
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import {
   McpServerRegistry,
@@ -619,6 +620,20 @@ async function handleUpdate(args) {
   console.log(`\nRe-run "aiwg mcp inject --all" to propagate changes to provider configs.`);
 }
 
+function redactUrlUserinfo(value) {
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) {
+      url.username = '***';
+      url.password = '';
+      return url.toString();
+    }
+  } catch {
+    // Leave unparseable URLs unchanged.
+  }
+  return value;
+}
+
 /**
  * Handle `aiwg mcp list` (managed servers from registry)
  */
@@ -637,7 +652,7 @@ async function handleList() {
   for (const server of servers) {
     console.log(`  ${server.name}`);
     console.log(`    Type: ${server.type}`);
-    if (server.url) console.log(`    URL: ${server.url}`);
+    if (server.url) console.log(`    URL: ${redactUrlUserinfo(server.url)}`);
     if (server.command) console.log(`    Command: ${server.command}${server.args ? ' ' + server.args.join(' ') : ''}`);
     if (server.headerEnv) {
       const refs = Object.entries(server.headerEnv).map(([header, envName]) => `${header}←${envName}`);
@@ -756,11 +771,6 @@ async function handleInject(args) {
   for (const p of providers) {
     if (ephemeral) {
       // Generate a standalone ephemeral config file
-      const targetPath = outPath ?? path.join(
-        process.env.TMPDIR || '/tmp',
-        `aiwg-mcp-${profileName ?? 'custom'}-${p}-${Date.now()}.json`,
-      );
-
       const allServers = await registry.list();
       const servers = serverFilter
         ? allServers.filter(s => serverFilter.includes(s.name))
@@ -789,10 +799,29 @@ async function handleInject(args) {
       if (Object.keys(mcpBlock).length === 0) continue;
 
       const config = { [mcpKey]: mcpBlock };
+      const tempDir = outPath || dryRun
+        ? undefined
+        : await fs.mkdtemp(path.join(os.tmpdir(), 'aiwg-mcp-'));
+      const targetPath = outPath ?? path.join(
+        tempDir ?? path.join(os.tmpdir(), 'aiwg-mcp-<random>'),
+        `${profileName ?? 'custom'}-${p}.json`,
+      );
 
       if (!dryRun) {
+        if (outPath) {
+          let stat;
+          try {
+            stat = await fs.lstat(targetPath);
+          } catch (error) {
+            if (error.code !== 'ENOENT') throw error;
+          }
+          if (stat?.isSymbolicLink()) {
+            throw new Error(`Refusing to write ephemeral MCP config to symbolic link: ${targetPath}`);
+          }
+        }
         await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        await fs.writeFile(targetPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+        await fs.writeFile(targetPath, JSON.stringify(config, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
+        await fs.chmod(targetPath, 0o600);
       }
 
       const prefix = dryRun ? '[DRY RUN] ' : '';
@@ -971,7 +1000,7 @@ async function handleProfileShow(args) {
       if (server) {
         const detail = server.type === 'stdio'
           ? `stdio  ${server.command}${server.args ? ' ' + server.args.join(' ') : ''}`
-          : `${server.type}  ${server.url}`;
+          : `${server.type}  ${redactUrlUserinfo(server.url)}`;
         console.log(`  ${serverName.padEnd(24)} ${detail}`);
         if (server.description) console.log(`  ${''.padEnd(24)} ${server.description}`);
       } else {

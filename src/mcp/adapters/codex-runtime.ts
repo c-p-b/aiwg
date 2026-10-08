@@ -15,7 +15,7 @@
  * @implements #892
  */
 
-import { readFile, writeFile, mkdir, symlink, access, readdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, symlink, access, readdir, chmod } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { existsSync } from 'fs';
@@ -148,7 +148,9 @@ export async function writeProfileConfig(
     mcpSections.join('\n\n') +
     '\n';
 
-  await writeFile(runtimeConfigPath(profile), configContent, 'utf-8');
+  const configPath = runtimeConfigPath(profile);
+  await writeFile(configPath, configContent, { encoding: 'utf-8', mode: 0o600 });
+  await chmod(configPath, 0o600);
 }
 
 /**

@@ -146,6 +146,9 @@ mode. Precedence is the flag, then `AIWG_MCP_CREDENTIAL_POLICY`, then the regist
 `aiwg mcp credential-policy <policy>`. `aiwg session --provider codex --profile <p>` applies the same
 policy to the profile's runtime config.
 
+Ephemeral and Codex runtime-home configs are written owner-only (0600). Persistent project files such as
+`.mcp.json` should hold credential references rather than literal secrets.
+
 ## Technical Details
 
 - **Transport:** stdio (standard input/output)
