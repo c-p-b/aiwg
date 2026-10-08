@@ -505,6 +505,16 @@ function parseFlag(args, flag) {
   return args[idx + 1];
 }
 
+/** Skip option values when locating a server name, regardless of flag order. */
+function serverName(args) {
+  const valueFlags = new Set(['--type', '--url', '--command', '--args', '--env',
+    '--headers', '--header-env', '--env-from', '--description']);
+  for (let i = 0; i < args.length; i++) {
+    if (valueFlags.has(args[i])) { i++; continue; }
+    if (!args[i].startsWith('--')) return args[i];
+  }
+}
+
 /**
  * Parse comma-separated key=value pairs into an object
  */
@@ -523,8 +533,7 @@ function parseKVPairs(str) {
  * Handle `aiwg mcp add <name> [opts]`
  */
 async function handleAdd(args) {
-  const positional = args.filter(a => !a.startsWith('--'));
-  const name = positional[0];
+  const name = serverName(args);
 
   if (!name) {
     console.error('Usage: aiwg mcp add <name> --url <url> [--type http|stdio|sse] [--command <cmd>] [--args <a,b>]');
@@ -565,9 +574,12 @@ async function handleAdd(args) {
   });
 
   console.log(`Added MCP server: ${name}`);
-  if (url) console.log(`  URL: ${url}`);
+  if (url) console.log(`  URL: ${redactUrlUserinfo(url)}`);
   if (command) console.log(`  Command: ${command}`);
   console.log(`  Type: ${type}`);
+  for (const [key, values] of [['env', parseKVPairs(envStr)], ['headers', parseKVPairs(headersStr)]]) {
+    if (values) console.log(`  ${key}: ${Object.keys(values).join(', ')}`);
+  }
   console.log(`\nUse "aiwg mcp inject --provider <name>" to inject into a provider config.`);
 }
 
@@ -592,8 +604,7 @@ async function handleRemove(args) {
  * Handle `aiwg mcp update <name> [opts]`
  */
 async function handleUpdate(args) {
-  const positional = args.filter(a => !a.startsWith('--'));
-  const name = positional[0];
+  const name = serverName(args);
 
   if (!name) {
     console.error('Usage: aiwg mcp update <name> --url <url> [--type <type>] ...');
@@ -630,7 +641,10 @@ async function handleUpdate(args) {
   await registry.update(name, updates);
   console.log(`Updated MCP server: ${name}`);
   for (const [key, value] of Object.entries(updates)) {
-    console.log(`  ${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}`);
+    const display = key === 'url' ? redactUrlUserinfo(value)
+      : ['env', 'headers', 'headerEnv', 'envFrom'].includes(key) ? Object.keys(value || {}).join(', ')
+      : typeof value === 'object' ? JSON.stringify(value) : value;
+    console.log(`  ${key}: ${display}`);
   }
   console.log(`\nRe-run "aiwg mcp inject --all" to propagate changes to provider configs.`);
 }
@@ -644,7 +658,11 @@ function redactUrlUserinfo(value) {
       return url.toString();
     }
   } catch {
-    // Leave unparseable URLs unchanged.
+    // Malformed hosts may still carry credentials in the authority.
+    return value.replace(/^(\s*[A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/?#]*)/, (_, scheme, authority) => {
+      const at = authority.lastIndexOf('@');
+      return scheme + (at < 0 ? authority : '***@' + authority.slice(at + 1));
+    });
   }
   return value;
 }

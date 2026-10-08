@@ -20,6 +20,11 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
 
 ### Fixed
 
+- Codex profile sessions stop before runtime setup or launch on credential-policy refusal.
+  Runtime configs remove the entire global `mcp_servers` subtree, including inline, dotted,
+  quoted, and array-table forms, and refuse malformed base TOML. Runtime homes use `0700`;
+  runtime and persistent Codex configs use private atomic writes and reject symlink targets.
+  `aiwg mcp add` and `update` redact URL userinfo and show env/header key names only.
 - opencode local servers now receive their variables as `environment`, the key opencode reads, instead
   of `env`.
 - `aiwg mcp inject --provider claude` and `aiwg mcp install claude` now write project MCP servers to

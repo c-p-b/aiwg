@@ -403,6 +403,45 @@ describe("injectServers", () => {
     filesystemBoundary.root = "";
   });
 
+  it.each([
+    { implementation: 'TypeScript', inject: injectServers },
+    { implementation: 'runtime', inject: injectRuntimeServers as typeof injectServers },
+  ].flatMap(implementation => ['codex', 'cursor'].map(provider => ({ ...implementation, provider }))))(
+    '$implementation $provider applies policy to selected servers and preserves unrelated operator entries', async ({ inject, provider }) => {
+      const configPath = getProviderConfigPath(provider as Parameters<typeof inject>[1], projectDir);
+      await mkdir(dirname(configPath), { recursive: true });
+      const oldServer = { url: 'https://old.example/mcp', headers: { Authorization: 'Bearer old-secret' } };
+      const original = provider === 'codex'
+        ? '[mcp_servers.old]\nurl = "https://old.example/mcp"\nhttp_headers = { Authorization = "Bearer old-secret" }\n'
+        : JSON.stringify({ mcpServers: { old: oldServer } });
+      await writeFile(configPath, original);
+      const result = await inject(registry, provider as Parameters<typeof inject>[1], { projectDir, servers: ['fortemi'], credentialPolicy: 'none' });
+      expect(result.error).toBeUndefined();
+      const written = await readFile(configPath, 'utf-8');
+      expect(written).toContain('Bearer old-secret');
+      expect(written).toContain('fortemi');
+      if (provider === 'cursor') expect(JSON.parse(written).mcpServers.old).toEqual(oldServer);
+      else expect(written).toContain(original.trimEnd());
+    });
+
+  it.each([
+    { implementation: 'TypeScript', inject: injectServers },
+    { implementation: 'runtime', inject: injectRuntimeServers as typeof injectServers },
+  ].flatMap(implementation => ['url', 'auth'].map(field => ({ ...implementation, field }))))(
+    '$implementation refuses userinfo in $field before persistent writes', async ({ inject, field }) => {
+      const provider = field === 'auth' ? 'omp' : 'codex';
+      await registry.add({ name: 'leaky', type: 'http', url: field === 'url'
+        ? 'https://user:policy-canary@bad host/mcp' : 'https://example.test/mcp',
+        ...(field === 'auth' ? { auth: { type: 'oauth', tokenUrl: 'https://client:policy-canary@idp.example/token' } } : {}),
+      });
+      const before = await readFile(registry.getPath(), 'utf-8');
+      filesystemBoundary.mutations.length = 0;
+      await expect(inject(registry, provider, { projectDir, servers: ['leaky'], credentialPolicy: 'references' }))
+        .rejects.toThrow(/userinfo/);
+      expect(filesystemBoundary.mutations).toEqual([]);
+      expect(await readFile(registry.getPath(), 'utf-8')).toBe(before);
+    });
+
   const jsonAdapters = [
     { provider: "claude-code", location: "project", file: ".mcp.json", shape: "claude" },
     { provider: "claude", location: "project", file: ".mcp.json", shape: "claude" },

@@ -154,9 +154,22 @@ The credential policy decides what `aiwg mcp inject` will render:
 A refusal names each server and field, exits non-zero and writes nothing, including in `--ephemeral`
 mode. Precedence is the flag, then `AIWG_MCP_CREDENTIAL_POLICY`, then the registry default set with
 `aiwg mcp credential-policy <policy>`. `aiwg session --provider codex --profile <p>` applies the same
-policy to the profile's runtime config.
+policy before setup and launch. Any setup failure prevents launch and reuse of an existing runtime
+config. With `--persist`, successful injection launches against the default Codex home.
 
-Ephemeral and Codex runtime-home configs are written owner-only (0600). Persistent project files such as
+Persistent injection applies credential policy to the selected registry servers. Unrelated entries
+already in the provider config are preserved, including their credentials. Use `--ephemeral` or a
+Codex profile runtime home to render a standalone server set under a restrictive policy.
+The profile config removes the entire global `mcp_servers` subtree, including inline and quoted
+forms, and refuses malformed base TOML instead of copying it.
+
+Ephemeral and Codex runtime-home configs are written owner-only (0600). Codex runtime homes use
+0700; runtime and persistent Codex config writes are atomic and refuse symlink targets.
+A symlinked global `~/.codex` home is supported; `roles-runtime`, profile directories, and
+runtime config files beneath it must be real directories/files. Runtime profile names must match
+`[a-z0-9-]+`.
+`aiwg mcp add` and `update` show env/header key names only and redact URL userinfo.
+Persistent project files such as
 `.mcp.json` should hold credential references rather than literal secrets.
 
 ## Technical Details

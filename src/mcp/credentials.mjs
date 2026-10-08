@@ -88,13 +88,16 @@ export function renderCredentialMaps(server, provider) {
   };
 }
 
-function urlCarriesUserinfo(url) {
+export function urlCarriesUserinfo(url) {
   if (typeof url !== 'string') return false;
   try {
     const parsed = new URL(url);
     return parsed.username !== '' || parsed.password !== '';
   } catch {
-    return false;
+    // Invalid hosts must not conceal userinfo from policy checks. Restrict
+    // the fallback to the authority so an @ in a path is not a credential.
+    const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)/.exec(url.trim())?.[1];
+    return authority?.includes('@') ?? false;
   }
 }
 
@@ -112,6 +115,11 @@ export function credentialPolicyViolations(server, policy) {
   if (hasEntries(server.env)) violations.push('env');
   if (hasEntries(server.headers)) violations.push('headers');
   if (urlCarriesUserinfo(server.url)) violations.push('url userinfo');
+  for (const field of ['auth', 'oauth']) {
+    for (const key of ['tokenUrl', 'redirectUri', 'resource']) {
+      if (urlCarriesUserinfo(server[field]?.[key])) violations.push(`${field}.${key} userinfo`);
+    }
+  }
   if (server.auth?.clientSecret) violations.push('auth.clientSecret');
   if (server.oauth?.clientSecret) violations.push('oauth.clientSecret');
   if (policy === 'none') {

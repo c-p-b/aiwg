@@ -1,3 +1,4 @@
+import { urlCarriesUserinfo } from './credentials.mjs';
 import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -40,11 +41,7 @@ export function assertProjectCredentials(servers, configPath) {
   const literals = servers.flatMap(server => {
     const keys = [...Object.keys(server.env || {}), ...Object.keys(server.headers || {})];
     const reasons = keys.length ? [`${server.name} has literal env/header values (${keys.join(', ')})`] : [];
-    if (server.url) {
-      let url;
-      try { url = new URL(server.url); } catch { /* Invalid URLs have no parsed userinfo. */ }
-      if (url?.username || url?.password) reasons.push(`${server.name} has URL userinfo`);
-    }
+    if (urlCarriesUserinfo(server.url)) reasons.push(`${server.name} has URL userinfo`);
     return reasons;
   });
   if (literals.length) {

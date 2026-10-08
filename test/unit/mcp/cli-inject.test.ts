@@ -188,6 +188,47 @@ describe("aiwg mcp inject --provider claude", () => {
 });
 
 describe("aiwg mcp credential display", () => {
+  it.each(["add", "update"])("redacts URL userinfo and prints only env/header keys on %s", command => {
+    const name = command === "add" ? "new-remote" : "remote";
+    const result = runCliWithOutput([command, name, "--url", "https://user:canary-pass-789@example.test/mcp",
+      "--env", "TOKEN=canary-env-123", "--headers", "Authorization=canary-header-456"]);
+    expect(result.status).toBe(0);
+    const output = result.stdout + result.stderr;
+    expect(output).toContain("https://***@example.test/mcp");
+    expect(output).toContain("env: TOKEN");
+    expect(output).toContain("headers: Authorization");
+    for (const value of ["canary-pass-789", "user:", "canary-env-123", "canary-header-456"]) expect(output).not.toContain(value);
+    const entry = JSON.parse(readFileSync(join(configDir, "mcp-servers.json"), "utf-8")).servers[name];
+    expect(entry.env.TOKEN).toBe("canary-env-123");
+    expect(entry.headers.Authorization).toBe("canary-header-456");
+  });
+
+  it.each(['add', 'update'].flatMap(command => ['--env', '--headers', '--url'].map(flag => ({ command, flag }))))(
+    'parses $flag before the name on $command without exposing its value', ({ command, flag }) => {
+      const value = flag === '--url' ? 'https://user:order-canary@example.test/mcp' : 'TOKEN=order-canary';
+      const name = command === 'add' ? 'new-remote' : 'remote';
+      const result = runCliWithOutput([command, flag, value, name, '--type', 'http', '--url',
+        'https://user:order-canary@example.test/mcp']);
+      expect(result.status).toBe(0);
+      expect(result.stdout + result.stderr).not.toContain('order-canary');
+      expect(result.stdout).toContain(`${command === 'add' ? 'Added' : 'Updated'} MCP server: ${name}`);
+      expect(JSON.parse(readFileSync(join(configDir, 'mcp-servers.json'), 'utf-8')).servers[name].name).toBe(name);
+    });
+
+  it('does not treat a header value as the name on a missing-server update', () => {
+    const result = runCliWithOutput(['update', '--headers', 'Authorization=error-canary', 'missing']);
+    expect(result.status).toBe(1);
+    expect(result.stdout + result.stderr).toContain('missing');
+    expect(result.stdout + result.stderr).not.toContain('error-canary');
+  });
+
+  it.each(['add', 'update'])('redacts malformed URL userinfo on %s', command => {
+    const result = runCliWithOutput([command, command === 'add' ? 'new-remote' : 'remote', '--url', 'https://user:malformed-canary@bad host/mcp']);
+    expect(result.status).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain('malformed-canary');
+    expect(result.stdout + result.stderr).not.toContain('user:');
+  });
+
   it.each(["list", "profile show"])("redacts URL userinfo and omits env/header values in %s", command => {
     writeRegistry({
       remote: { name: "remote", type: "http", url: "https://user:canary-pass-789@example.test/mcp",
@@ -263,6 +304,38 @@ const installDestinations = [
 ];
 
 describe("MCP config write safety", () => {
+  it.each(["codex", "openai"])("atomically replaces existing private %s TOML during persistent injection", provider => {
+    const destination = join(homeDir, ".codex/config.toml");
+    mkdirSync(dirname(destination), { recursive: true });
+    writeFileSync(destination, 'model = "keep-model"\n[mcp_servers.existing]\ncommand = "keep"\n');
+    chmodSync(destination, 0o644);
+    const before = statSync(destination);
+    runCli(["inject", "--provider", provider]);
+    expect(statSync(destination).mode & 0o777).toBe(0o600);
+    expect(statSync(destination).ino).not.toBe(before.ino);
+    const completed = readFileSync(destination, "utf-8");
+    expect(completed).toContain('model = "keep-model"');
+    expect(completed).toContain('[mcp_servers.existing]');
+    expect(completed).toContain('[mcp_servers.remote]');
+    expect(readdirSync(dirname(destination))).toEqual(["config.toml"]);
+  });
+
+  it.each(["codex", "openai"].flatMap(provider => [false, true].map(dangling => ({ provider, dangling }))))(
+    "refuses persistent $provider TOML symlinks (dangling=$dangling)", ({ provider, dangling }) => {
+      const destination = join(homeDir, ".codex/config.toml");
+      const outside = join(root, "outside.toml");
+      mkdirSync(dirname(destination), { recursive: true });
+      if (!dangling) writeFileSync(outside, 'model = "untouched"\n');
+      symlinkSync(outside, destination);
+      const result = runCliWithOutput(["inject", "--provider", provider]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("symlink");
+      expect(lstatSync(destination).isSymbolicLink()).toBe(true);
+      if (dangling) expect(existsSync(outside)).toBe(false);
+      else expect(readFileSync(outside, "utf-8")).toBe('model = "untouched"\n');
+    },
+  );
+
   it.each([false, true])("refuses inject through a project .mcp.json symlink (dangling=%s)", dangling => {
     const destination = join(projectDir, ".mcp.json");
     const outside = join(root, "outside.json");
