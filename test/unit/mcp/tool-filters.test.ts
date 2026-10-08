@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 
@@ -152,6 +152,49 @@ describe("aiwg mcp CLI with profile tool filters", () => {
     expect(JSON.parse(readFileSync(settings, "utf-8"))).toEqual({
       permissions: { deny: ["mcp__tracker__delete_issue"], allow: ["mcp__tracker__list_issues"] },
     });
+    if (process.platform !== "win32") {
+      expect(statSync(out).mode & 0o777).toBe(0o600);
+      expect(statSync(settings).mode & 0o777).toBe(0o600);
+      chmodSync(settings, 0o644);
+      run(["inject", "--provider", "claude", "--profile", "triage", "--ephemeral", "--out", out]);
+      expect(statSync(settings).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("keeps the default ephemeral settings sidecar in the same private directory", () => {
+    run(["profile", "add", "triage", "--servers", "tracker", "--tool-deny", "tracker__delete_issue"]);
+    run(["inject", "--provider", "claude", "--profile", "triage", "--ephemeral", "--no-credentials"]);
+    const tempDir = join(root, readdirSync(root).find(name => name.startsWith("aiwg-mcp-"))!);
+    expect(readdirSync(tempDir).sort()).toEqual(["triage-claude-code.json", "triage-claude-code.settings.json"]);
+    if (process.platform !== "win32") {
+      expect(statSync(tempDir).mode & 0o777).toBe(0o700);
+      for (const file of readdirSync(tempDir)) expect(statSync(join(tempDir, file)).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("refuses a settings sidecar symlink before writing either output", () => {
+    run(["profile", "add", "triage", "--servers", "tracker", "--tool-deny", "tracker__delete_issue"]);
+    const out = join(root, "triage.json");
+    const target = join(root, "operator.json");
+    writeFileSync(target, "operator content");
+    symlinkSync(target, join(root, "triage.settings.json"));
+    expect(() => run(["inject", "--provider", "claude", "--profile", "triage", "--ephemeral", "--out", out]))
+      .toThrow(/symbolic link/);
+    expect(existsSync(out)).toBe(false);
+    expect(readFileSync(target, "utf-8")).toBe("operator content");
+  });
+
+  it("enforces credential policy before writing an ephemeral config or its settings", () => {
+    run(["profile", "add", "triage", "--servers", "tracker", "--tool-deny", "tracker__delete_issue"]);
+    const registryPath = join(root, "config", "mcp-servers.json");
+    const registry = JSON.parse(readFileSync(registryPath, "utf-8"));
+    registry.servers.tracker.headerEnv = { Authorization: "TOKEN" };
+    writeFileSync(registryPath, JSON.stringify(registry));
+    const out = join(root, "triage.json");
+    expect(() => run(["inject", "--provider", "claude", "--profile", "triage", "--ephemeral", "--out", out, "--no-credentials"]))
+      .toThrow(/Refusing to render/);
+    expect(existsSync(out)).toBe(false);
+    expect(existsSync(join(root, "triage.settings.json"))).toBe(false);
   });
 
   it("prints a warning for each filter the provider cannot express", () => {

@@ -428,9 +428,13 @@ export const sessionHandler: CommandHandler = {
           const profiles = new McpProfileRegistry();
           const registry = new McpServerRegistry();
           const resolvedServers = await profiles.resolveServers(profile, registry) as import('../../mcp/registry.js').McpServerDefinition[];
-          await ensureRuntimeHome(profile);
           const { resolveToolFilters } = await import('../../mcp/tool-filters.mjs');
+          const { assertCredentialPolicy, resolveCredentialPolicy } = await import('../../mcp/credentials.mjs');
+          const credentialPolicy = resolveCredentialPolicy({ registryPolicy: await registry.getCredentialPolicy() });
+          assertCredentialPolicy(resolvedServers, credentialPolicy);
+          await ensureRuntimeHome(profile);
           const warnings = await writeProfileConfig(profile, resolvedServers, {
+            credentialPolicy,
             toolFilters: resolveToolFilters(await profiles.get(profile), 'codex'),
           });
           for (const warning of warnings) console.warn(`  WARN  codex: ${warning}`);

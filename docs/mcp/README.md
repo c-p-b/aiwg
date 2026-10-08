@@ -129,7 +129,7 @@ provider cannot express is printed as a `WARNING` line on stderr; it is not appl
 
 | Provider | toolDeny | toolAllow | Globs |
 | --- | --- | --- | --- |
-| Claude Code | `permissions.deny` rule `mcp__<server>__<tool>` | `permissions.allow` (pre-approval, not an allowlist) | yes |
+| Claude Code | `permissions.deny`: `mcp__<server>__<tool>` | `permissions.allow` (pre-approval) | yes |
 | Codex | `disabled_tools`; `enabled = false` for `<server>__*` | `enabled_tools` | no |
 | opencode | `tools` map entry `<server>_<tool>: false` | `<server>_*: false`, then each tool `true` | yes |
 | Factory, Antigravity | `disabledTools`; `disabled: true` for `<server>__*` | not supported | no |
@@ -141,6 +141,45 @@ them to `.claude/settings.local.json` (`~/.claude/settings.json` with `--scope u
 rules already there. `--ephemeral --out run.json` also writes `run.settings.json` and prints
 `claude --mcp-config run.json --settings run.settings.json`. `aiwg session --provider codex
 --profile <p>` writes the Codex filters into the profile's runtime config.
+
+## Credentials in Injected Servers
+
+A registry entry can carry a credential as a literal value (`--env`, `--headers`) or as a reference to an
+environment variable (`--header-env HEADER=VAR`, `--env-from NAME=VAR`). A reference writes only the
+variable name; the harness reads the value when it starts the server. Each harness spells a reference
+differently:
+
+| Harness | `--header-env` / `--env-from` renders as |
+| --- | --- |
+| Claude Code | `${VAR}` |
+| Cursor, Windsurf | `${env:VAR}` |
+| Factory | `${VAR}` |
+| opencode | `{env:VAR}` |
+| OMP, Grok Build | `${VAR}` |
+| Codex | `env_http_headers = { HEADER = "VAR" }` and `env_vars = ["VAR"]` |
+| Antigravity, Warp | refused: neither documents interpolation in its MCP config |
+
+Codex forwards a variable only under its own name, so `--env-from` for Codex must map `VAR=VAR`.
+Claude Code reads `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `NPM_TOKEN` as empty in a remote
+server's URL and headers, so do not reference those.
+
+The credential policy decides what `aiwg mcp inject` will render:
+
+| Policy | Flag | Renders |
+| --- | --- | --- |
+| `literal` (default) | none | everything |
+| `references` | `--strict-credentials` | references only; refuses literal credentials |
+| `none` | `--no-credentials` | refuses every credential-bearing field, references included |
+
+`references` refuses literal `env`/`headers`, URL userinfo and OAuth client secrets.
+
+A refusal names each server and field, exits non-zero and writes nothing, including in `--ephemeral`
+mode. Precedence is the flag, then `AIWG_MCP_CREDENTIAL_POLICY`, then the registry default set with
+`aiwg mcp credential-policy <policy>`. `aiwg session --provider codex --profile <p>` applies the same
+policy to the profile's runtime config.
+
+Ephemeral and Codex runtime-home configs are written owner-only (0600). Persistent project files such as
+`.mcp.json` should hold credential references rather than literal secrets.
 
 ## Technical Details
 

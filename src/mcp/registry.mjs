@@ -3,6 +3,7 @@ import { manageGrokBuildMcp } from './grok-build-config.mjs';
 import { replaceServer } from './toml-editor.mjs';
 import { resolveOmpPaths } from '../providers/omp-paths.mjs';
 import { applyJsonToolFilterPlan, claudeSettingsPath, mergeClaudePermissions, planToolFilters } from './tool-filters.mjs';
+import { assertCredentialPolicy, renderCredentialMaps, validateEnvReferenceName } from './credentials.mjs';
 /**
  * MCP Server Registry (Runtime ESM)
  *
@@ -72,6 +73,12 @@ function validateCredentialReferences(def) {
     if (!header.trim()) throw new Error('MCP header-env header name must not be empty');
     if (!ENV_REFERENCE_NAME.test(envName)) {
       throw new Error(`Invalid MCP header environment variable reference "${envName}"`);
+    }
+  }
+  for (const [key, envName] of Object.entries(def.envFrom || {})) {
+    if (!ENV_REFERENCE_NAME.test(key)) throw new Error(`Invalid MCP env-from variable name "${key}"`);
+    if (!ENV_REFERENCE_NAME.test(envName)) {
+      throw new Error(`Invalid MCP env-from environment variable reference "${envName}"`);
     }
   }
 }
@@ -198,6 +205,17 @@ export class McpServerRegistry {
     return [...providers];
   }
 
+  async getCredentialPolicy() {
+    const data = await this.load();
+    return data.credentialPolicy;
+  }
+
+  async setCredentialPolicy(policy) {
+    const data = await this.load();
+    data.credentialPolicy = policy;
+    await this.save();
+  }
+
   clearCache() {
     this.#cache = null;
   }
@@ -209,6 +227,7 @@ export class McpServerRegistry {
 
 export function buildServerConfig(server, provider) {
   const mcpDefinition = getMcpInjectionDefinition(provider);
+  const { env, headers } = renderCredentialMaps(server, normalizeRuntimeProviderId(provider) || provider);
 
   switch (mcpDefinition?.serverConfigFormat) {
     case 'claude-code': {
@@ -216,33 +235,33 @@ export function buildServerConfig(server, provider) {
         return {
           command: server.command,
           args: server.args || [],
-          ...(server.env ? { env: server.env } : {}),
+          ...(env ? { env } : {}),
         };
       }
       // Claude Code skips a url entry that has no type.
       return {
         type: server.type,
         url: server.url,
-        ...(server.headers ? { headers: server.headers } : {}),
+        ...(headers ? { headers } : {}),
       };
     }
     case 'antigravity': {
       if (server.type === 'stdio') {
-        return { command: server.command, args: server.args || [], ...(server.env ? { env: server.env } : {}) };
+        return { command: server.command, args: server.args || [], ...(env ? { env } : {}) };
       }
-      return { serverUrl: server.url, ...(server.headers ? { headers: server.headers } : {}) };
+      return { serverUrl: server.url, ...(headers ? { headers } : {}) };
     }
     case 'standard': {
       if (server.type === 'stdio') {
         return {
           command: server.command,
           args: server.args || [],
-          ...(server.env ? { env: server.env } : {}),
+          ...(env ? { env } : {}),
         };
       }
       return {
         url: server.url,
-        ...(server.headers ? { headers: server.headers } : {}),
+        ...(headers ? { headers } : {}),
       };
     }
 
@@ -253,29 +272,30 @@ export function buildServerConfig(server, provider) {
           command: server.command,
           args: server.args || [],
           disabled: false,
-          ...(server.env ? { env: server.env } : {}),
+          ...(env ? { env } : {}),
         };
       }
       return {
         type: server.type,
         url: server.url,
         disabled: false,
-        ...(server.headers ? { headers: server.headers } : {}),
+        ...(headers ? { headers } : {}),
       };
     }
 
     case 'opencode': {
       if (server.type === 'stdio') {
+        // opencode names a local server's variables `environment`.
         return {
           type: 'local',
           command: [server.command, ...(server.args || [])],
-          ...(server.env ? { env: server.env } : {}),
+          ...(env ? { environment: env } : {}),
         };
       }
       return {
         type: 'remote',
         url: server.url,
-        ...(server.headers ? { headers: server.headers } : {}),
+        ...(headers ? { headers } : {}),
       };
     }
 
@@ -300,7 +320,11 @@ function tomlKey(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value) ? value : tomlString(value);
 }
 
-function buildServerToml(server) {
+function tomlInlineTable(values) {
+  return `{ ${Object.entries(values).map(([name, value]) => `${tomlKey(name)} = ${tomlString(value)}`).join(', ')} }`;
+}
+
+export function buildServerToml(server) {
   const lines = [];
   lines.push(`[mcp_servers.${tomlKey(server.name)}]`);
 
@@ -310,8 +334,21 @@ function buildServerToml(server) {
       const argsStr = server.args.map(a => tomlString(a)).join(', ');
       lines.push(`args = [${argsStr}]`);
     }
+    if (server.env && Object.keys(server.env).length > 0) lines.push(`env = ${tomlInlineTable(server.env)}`);
+    // Codex forwards a variable only under its own name (env_vars).
+    const forwarded = Object.entries(server.envFrom || {});
+    for (const [key, name] of forwarded) {
+      validateEnvReferenceName(name);
+      if (key !== name) {
+        throw new Error(`MCP server "${server.name}": Codex forwards environment variables under their own name only; env-from ${key}=${name} cannot be rendered. Use ${name}=${name}.`);
+      }
+    }
+    if (forwarded.length > 0) lines.push(`env_vars = [${forwarded.map(([name]) => tomlString(name)).join(', ')}]`);
   } else {
     lines.push(`url = ${tomlString(server.url)}`);
+    if (server.headers && Object.keys(server.headers).length > 0) lines.push(`http_headers = ${tomlInlineTable(server.headers)}`);
+    for (const name of Object.values(server.headerEnv || {})) validateEnvReferenceName(name);
+    if (server.headerEnv && Object.keys(server.headerEnv).length > 0) lines.push(`env_http_headers = ${tomlInlineTable(server.headerEnv)}`);
   }
 
   lines.push(`startup_timeout_sec = 10.0`);
@@ -356,6 +393,7 @@ export async function injectServers(registry, provider, options = {}) {
     ? planToolFilters(provider, allServers.map(server => server.name), options.toolFilters)
     : null;
   if (toolPlan) result.warnings = toolPlan.warnings;
+  assertCredentialPolicy(allServers, options.credentialPolicy);
 
   if (normalizedProvider === 'omp') {
     try {
