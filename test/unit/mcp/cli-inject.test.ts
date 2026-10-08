@@ -38,12 +38,12 @@ function runCli(args: string[]) {
   });
 }
 
-function runCliWithOutput(args: string[]) {
+function runCliWithOutput(args: string[], env: Record<string, string> = {}) {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
     cwd: projectDir,
     encoding: "utf-8",
     timeout: 60_000,
-    env: { PATH: process.env.PATH, HOME: homeDir, AIWG_CONFIG: configDir, TMPDIR: root },
+    env: { PATH: process.env.PATH, HOME: homeDir, AIWG_CONFIG: configDir, TMPDIR: root, ...env },
   });
   if (result.error) throw result.error;
   return { stdout: result.stdout, stderr: result.stderr, status: result.status };
@@ -77,34 +77,45 @@ describe("aiwg mcp inject --provider claude", () => {
     });
   });
 
-  it("warns about literal env and header values without printing them", () => {
+  it.each([false, true])("refuses literal env and header values without printing them (existing=%s)", existing => {
     writeRegistry({
       local: { name: "local", type: "stdio", command: "synthetic-command", env: { API_TOKEN: "canary-value-123" } },
       remote: { name: "remote", type: "http", url: "https://synthetic.example/mcp", headers: { Authorization: "Bearer canary-hdr-456" } },
     });
 
+    const destination = join(projectDir, ".mcp.json");
+    const original = '{ "mcpServers": {}, "preference": "keep" }\n';
+    if (existing) writeFileSync(destination, original);
+    const before = readFileSync(join(configDir, "mcp-servers.json"), "utf-8");
     const result = runCliWithOutput(["inject", "--provider", "claude"]);
-    expect(result.status).toBe(0);
-    expect(result.stderr).toContain("local writes literal env/header values (API_TOKEN)");
-    expect(result.stderr).toContain("remote writes literal env/header values (Authorization)");
+    expect(result.status).toBe(1);
+    if (existing) expect(readFileSync(destination, "utf-8")).toBe(original);
+    else expect(existsSync(destination)).toBe(false);
+    expect(readFileSync(join(configDir, "mcp-servers.json"), "utf-8")).toBe(before);
+    expect(result.stderr).toContain("--scope user");
+    expect(result.stderr).toContain("local has literal env/header values (API_TOKEN)");
+    expect(result.stderr).toContain("remote has literal env/header values (Authorization)");
     expect(result.stderr).toContain(".mcp.json");
     expect(`${result.stdout}${result.stderr}`).not.toContain("canary-value-123");
     expect(`${result.stdout}${result.stderr}`).not.toContain("canary-hdr-456");
   });
 
-  it("does not warn for user-scope injection", () => {
+  it("allows literal values at user scope and creates a private config", () => {
     writeRegistry({
       local: { name: "local", type: "stdio", command: "synthetic-command", env: { API_TOKEN: "canary-value-123" } },
     });
     const result = runCliWithOutput(["inject", "--provider", "claude", "--scope", "user"]);
     expect(result.status).toBe(0);
-    expect(result.stderr).not.toContain("WARNING:");
+    expect(result.stderr).not.toContain("Refusing");
+    const destination = join(homeDir, ".claude.json");
+    expect(statSync(destination).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(destination, "utf-8")).mcpServers.local.env.API_TOKEN).toBe("canary-value-123");
   });
 
-  it("does not warn for servers without literal env or headers", () => {
+  it("allows servers without literal env or headers", () => {
     const result = runCliWithOutput(["inject", "--provider", "claude"]);
     expect(result.status).toBe(0);
-    expect(result.stderr).not.toContain("WARNING:");
+    expect(result.stderr).not.toContain("Refusing");
   });
 
   it("writes an ephemeral --mcp-config file in Claude Code's entry shape", () => {
@@ -203,10 +214,160 @@ describe("aiwg mcp credential display", () => {
 });
 
 describe("aiwg mcp install claude", () => {
-  it("writes the AIWG server to .mcp.json", () => {
-    runCli(["install", "claude", projectDir]);
-    const written = JSON.parse(readFileSync(join(projectDir, ".mcp.json"), "utf-8"));
-    expect(written.mcpServers.aiwg).toMatchObject({ command: "aiwg", args: ["mcp", "serve"] });
-    expect(existsSync(join(projectDir, ".claude", "settings.local.json"))).toBe(false);
+  it.each([undefined, "configured-root"])("default project install succeeds without env (AIWG_ROOT=%s)", aiwgRoot => {
+    const result = runCliWithOutput(["install", "claude"], aiwgRoot ? { AIWG_ROOT: aiwgRoot } : {});
+    expect(result.status).toBe(0);
+    expect(JSON.parse(readFileSync(join(projectDir, ".mcp.json"), "utf-8"))).toEqual({
+      mcpServers: { aiwg: { command: "aiwg", args: ["mcp", "serve"] } },
+    });
+  });
+
+  it.each([undefined, "configured-root"])("writes private user config with env only when AIWG_ROOT is set (%s)", aiwgRoot => {
+    const result = runCliWithOutput(["install", "claude", "--scope", "user"], aiwgRoot ? { AIWG_ROOT: aiwgRoot } : {});
+    expect(result.status).toBe(0);
+    const destination = join(homeDir, ".claude.json");
+    expect(JSON.parse(readFileSync(destination, "utf-8")).mcpServers.aiwg).toEqual({
+      command: "aiwg", args: ["mcp", "serve"], ...(aiwgRoot ? { env: { AIWG_ROOT: aiwgRoot } } : {}),
+    });
+    expect(statSync(destination).mode & 0o777).toBe(0o600);
+    expect(existsSync(join(projectDir, ".mcp.json"))).toBe(false);
+  });
+
+  it("refuses malformed .mcp.json and leaves it byte-identical", () => {
+    const destination = join(projectDir, ".mcp.json");
+    const damaged = '{ "mcpServers": { damaged config\n';
+    writeFileSync(destination, damaged);
+    const result = runCliWithOutput(["install", "claude", projectDir]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`Refusing to overwrite malformed MCP config ${destination}: invalid JSON`);
+    expect(readFileSync(destination, "utf-8")).toBe(damaged);
+  });
+});
+
+const installDestinations = [
+  { target: "claude", file: ".mcp.json" },
+  { target: "claude", file: ".claude.json", home: true, args: ["--scope", "user"] },
+  { target: "cursor", file: ".cursor/mcp.json" },
+  { target: "factory", file: ".factory/mcp.json" },
+  { target: "factory", file: ".factory/mcp.json", home: true },
+  { target: "codex", file: ".codex/config.toml", home: true },
+  { target: "openai", file: ".codex/config.toml", home: true },
+  { target: "windsurf", file: ".codeium/windsurf/mcp_config.json", home: true },
+  { target: "vscode", file: ".vscode/mcp.json" },
+  { target: "copilot", file: ".vscode/mcp.json" },
+  { target: "opencode", file: "opencode.json" },
+  { target: "opencode", file: ".opencode/opencode.json" },
+  { target: "opencode", file: ".opencode/opencode.jsonc" },
+  { target: "omp", file: ".omp/mcp.json" },
+  { target: "oh-my-pi", file: ".omp/mcp.json" },
+];
+
+describe("MCP config write safety", () => {
+  it.each([false, true])("refuses inject through a project .mcp.json symlink (dangling=%s)", dangling => {
+    const destination = join(projectDir, ".mcp.json");
+    const outside = join(root, "outside.json");
+    const original = '{ "mcpServers": {}, "keep": true }\n';
+    if (!dangling) writeFileSync(outside, original);
+    symlinkSync(outside, destination);
+    const registry = readFileSync(join(configDir, "mcp-servers.json"), "utf-8");
+    const result = runCliWithOutput(["inject", "--provider", "claude"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(destination);
+    expect(result.stderr).toContain("symlink");
+    expect(lstatSync(destination).isSymbolicLink()).toBe(true);
+    if (dangling) expect(existsSync(outside)).toBe(false);
+    else expect(readFileSync(outside, "utf-8")).toBe(original);
+    expect(readFileSync(join(configDir, "mcp-servers.json"), "utf-8")).toBe(registry);
+  });
+
+  it.each(["symlink", "credentials"])("preflights --all before any writes on %s refusal", reason => {
+    writeRegistry({ local: { name: "local", type: "stdio", command: "synthetic-command", injectedProviders: ["cursor", "claude-code"], ...(reason === "credentials" ? { env: { API_TOKEN: "canary-value-123" } } : {}) } });
+    const outside = join(root, "outside.json");
+    if (reason === "symlink") {
+      writeFileSync(outside, '{}\n');
+      symlinkSync(outside, join(projectDir, ".mcp.json"));
+    }
+    const before = readFileSync(join(configDir, "mcp-servers.json"), "utf-8");
+    const result = runCliWithOutput(["inject", "--all"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(reason === "symlink" ? "symlink" : "API_TOKEN");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("canary-value-123");
+    expect(existsSync(join(projectDir, ".cursor"))).toBe(false);
+    expect(readFileSync(join(configDir, "mcp-servers.json"), "utf-8")).toBe(before);
+    if (reason === "symlink") expect(readFileSync(outside, "utf-8")).toBe('{}\n');
+    else expect(existsSync(join(projectDir, ".mcp.json"))).toBe(false);
+  });
+
+  it("preserves OpenCode JSONC entries containing URL strings", () => {
+    const destination = join(projectDir, ".opencode/opencode.jsonc");
+    mkdirSync(join(destination, ".."), { recursive: true });
+    writeFileSync(destination, '// keep existing server\n{ "mcp": { "existing": { "url": "https://synthetic.example/mcp" } } }\n');
+    runCli(["install", "opencode", projectDir]);
+    expect(JSON.parse(readFileSync(destination, "utf-8")).mcp).toMatchObject({ existing: { url: "https://synthetic.example/mcp" }, aiwg: { type: "local" } });
+  });
+
+  it.each(installDestinations.filter(({ home, file }) => !home && file.includes("/")))(
+    "refuses install $target through symlinked parent of $file", ({ target, file }) => {
+      const outside = join(root, "outside");
+      mkdirSync(outside);
+      symlinkSync(outside, join(projectDir, file.split("/")[0]));
+      const result = runCliWithOutput(["install", target, projectDir]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/symlink/);
+      expect(readdirSync(outside)).toEqual([]);
+    },
+  );
+
+  const jsonInstalls = installDestinations.filter(({ target }) => !["codex", "openai"].includes(target));
+  const invalidObjects = [null, [], "canary", 7, false];
+  it.each(jsonInstalls.flatMap(destination => invalidObjects.flatMap(value => [
+    { ...destination, original: JSON.stringify(value) },
+    { ...destination, original: JSON.stringify({
+      [destination.target === "opencode" ? "mcp" : ["vscode", "copilot"].includes(destination.target) ? "servers" : "mcpServers"]: value,
+    }) },
+  ])))("refuses install $target at $file with invalid object shape $original", ({ target, file, home, args = [], original }) => {
+    const destination = join(home ? homeDir : projectDir, file);
+    mkdirSync(join(destination, ".."), { recursive: true });
+    writeFileSync(destination, original);
+    const before = statSync(destination);
+    const result = runCliWithOutput(["install", target, home ? "." : projectDir, ...args]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/object/);
+    expect(readFileSync(destination, "utf-8")).toBe(original);
+    expect(statSync(destination).ino).toBe(before.ino);
+  });
+
+  it.each(installDestinations)("refuses install $target through $file (home=$home)", ({ target, file, home, args = [] }) => {
+    const destination = join(home ? homeDir : projectDir, file);
+    const outside = join(root, "outside.json");
+    const original = '{ "mcpServers": {}, "keep": true }\n';
+    mkdirSync(join(destination, ".."), { recursive: true });
+    writeFileSync(outside, original);
+    symlinkSync(outside, destination);
+    const result = runCliWithOutput(["install", target, home ? "." : projectDir, ...args]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(destination);
+    expect(result.stderr).toContain("symlink");
+    expect(lstatSync(destination).isSymbolicLink()).toBe(true);
+    expect(readFileSync(outside, "utf-8")).toBe(original);
+  });
+
+  it.each(["inject", "install"])("%s makes existing user config private and preserves other entries with atomic replacement", command => {
+    const destination = join(homeDir, ".claude.json");
+    writeFileSync(destination, JSON.stringify({ preferences: { keep: true }, mcpServers: { existing: { command: "keep" } } }));
+    chmodSync(destination, 0o644);
+    const before = statSync(destination);
+    const args = command === "inject" ? ["inject", "--provider", "claude"] : ["install", "claude"];
+    runCli([...args, "--scope", "user"]);
+    const after = statSync(destination);
+    expect(after.mode & 0o777).toBe(0o600);
+    expect(after.ino).not.toBe(before.ino);
+    expect(JSON.parse(readFileSync(destination, "utf-8"))).toMatchObject({ preferences: { keep: true }, mcpServers: { existing: { command: "keep" } } });
+    expect(readdirSync(homeDir)).toEqual([".claude.json"]);
+  });
+
+  it.each(installDestinations.filter(destination => destination.home && destination.target !== "claude"))("creates private install config for $target", ({ target, file }) => {
+    runCli(["install", target]);
+    expect(statSync(join(homeDir, file)).mode & 0o777).toBe(0o600);
   });
 });

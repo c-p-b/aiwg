@@ -27,8 +27,14 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
   does not read, so injected servers never loaded. `--scope user` writes `~/.claude.json`. HTTP and SSE
   entries now carry `type`, without which Claude Code skips a `url` entry. `--ephemeral` output now uses
   each provider's own entry shape instead of a generic one.
-  Project-scope injection of literal env or header values now warns, naming only the keys, because
-  `.mcp.json` is meant to be committed.
+  Project-scope Claude injection and installation refuse literal env/header values and URL userinfo,
+  naming only servers and keys and suggesting `--scope user` because `.mcp.json` is meant to be committed.
+  Claude installation omits project `env`; user installation includes `AIWG_ROOT` only when set.
+  MCP config writes reject symlink destinations and project symlink parents below the project root.
+  JSON installation refuses malformed JSON, non-object roots, and non-object server maps.
+  Atomic replacement cleans up temporary files even if closing fails, preserves existing project modes,
+  applies umask to new project files, and sets user configs to `0600`, including existing files.
+  User-scope Claude paths fall back to the OS home directory when `HOME` and `USERPROFILE` are unset.
 - Ephemeral and Codex runtime-home MCP configs use 0600 permissions; default ephemeral files use a private temp
   directory, and `aiwg mcp list` redacts URL userinfo.
 
