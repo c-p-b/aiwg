@@ -228,6 +228,7 @@ export class McpServerRegistry {
   async setCredentialPolicy(policy) {
     const data = await this.load();
     data.credentialPolicy = policy;
+    this.#layering?.ownFields.add('credentialPolicy');
     await this.save();
   }
 

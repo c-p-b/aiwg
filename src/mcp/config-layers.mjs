@@ -36,6 +36,9 @@ async function readLayer(path) {
   }
 }
 
+/** File-format fields every layer file keeps, whichever layer set them. */
+const FORMAT_FIELDS = ['apiVersion', 'kind'];
+
 /** Bookkeeping fields that do not make an entry "changed" for layering purposes. */
 const BOOKKEEPING_FIELDS = ['injectedProviders', 'addedAt', 'createdAt', 'updatedAt'];
 
@@ -56,25 +59,31 @@ function comparable(entry) {
  * name. Top-level fields come from the highest layer that sets them.
  *
  * Returns the merged data and a layering record: the names defined in the
- * write layer, and a comparable form of each entry as the lower layers define it.
+ * write layer, and comparable forms of entries and top-level fields in lower layers.
  */
 export async function loadLayered(layers, filename, collection, defaults) {
   const merged = { ...defaults, [collection]: {} };
   const lower = new Map();
   const own = new Set();
+  const lowerFields = new Map();
+  const ownFields = new Set();
   const writeLayer = layers.length - 1;
   for (const [index, dir] of layers.entries()) {
     const parsed = await readLayer(resolve(dir, filename));
     if (!parsed) continue;
     const { [collection]: entries, ...rest } = parsed;
     Object.assign(merged, rest);
+    for (const [field, value] of Object.entries(rest)) {
+      if (index === writeLayer) ownFields.add(field);
+      else lowerFields.set(field, comparable({ value }));
+    }
     for (const [name, entry] of Object.entries(entries || {})) {
       merged[collection][name] = entry;
       if (index === writeLayer) own.add(name);
       else lower.set(name, comparable(entry));
     }
   }
-  return { data: merged, layering: { lower, own } };
+  return { data: merged, layering: { lower, own, lowerFields, ownFields } };
 }
 
 /** True when the entry is defined only below the write layer. */
@@ -85,11 +94,16 @@ export function isLowerLayerEntry(layering, name) {
 /**
  * The data to persist in the write layer: entries defined there, new entries,
  * and lower-layer entries whose content (bookkeeping aside) was changed.
+ * Top-level fields follow the same rule, without entry bookkeeping exclusions;
+ * apiVersion and kind are always kept so the file stays self-describing.
  */
 export function writeLayerData(data, collection, layering) {
   const entries = Object.entries(data[collection] || {}).filter(([name, entry]) =>
     layering.own.has(name) || !layering.lower.has(name) || comparable(entry) !== layering.lower.get(name));
-  return { ...data, [collection]: Object.fromEntries(entries) };
+  const fields = Object.entries(data).filter(([field, value]) => field !== collection && (
+    FORMAT_FIELDS.includes(field) || layering.ownFields.has(field) || !layering.lowerFields.has(field) ||
+    comparable({ value }) !== layering.lowerFields.get(field)));
+  return { ...Object.fromEntries(fields), [collection]: Object.fromEntries(entries) };
 }
 
 /**

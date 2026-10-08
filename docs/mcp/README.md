@@ -128,6 +128,7 @@ aiwg mcp inject --provider claude --profile acme-dev --ephemeral --out /tmp/acme
 | Rule | Behaviour |
 | --- | --- |
 | Precedence | A server or profile in a later layer replaces the entry of the same name in an earlier one, whole |
+| Top-level (`credentialPolicy`) | Highest layer that sets it wins; writes never copy lower settings to last layer |
 | Writes | `add`, `update`, `profile add/edit` and injection records go to the last layer only |
 | Lower-layer entries | Updating one copies it into the last layer; removing one is refused |
 | `extends` | A profile inherits the servers of each base profile (base first), from any layer |

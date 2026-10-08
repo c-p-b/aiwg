@@ -1,6 +1,8 @@
 export interface Layering {
   lower: Map<string, string>;
   own: Set<string>;
+  lowerFields: Map<string, string>;
+  ownFields: Set<string>;
 }
 
 export function resolveConfigLayers(

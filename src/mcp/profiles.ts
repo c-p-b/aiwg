@@ -10,7 +10,7 @@
  * @implements #889
  */
 
-import { isLowerLayerEntry, loadLayered, resolveProfileExtends, resolveConfigLayers, writeLayerData } from './config-layers.mjs';
+import { type Layering, isLowerLayerEntry, loadLayered, resolveProfileExtends, resolveConfigLayers, writeLayerData } from './config-layers.mjs';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { resolve } from 'path';
 import { resolveConfigDir } from '../config/user-config.js';
@@ -122,7 +122,7 @@ export class McpProfileRegistry {
 
   /** Configuration layers, lowest precedence first; null for a single directory */
   private readonly layers: string[] | null;
-  private layering: { lower: Map<string, string>; own: Set<string> } | null = null;
+  private layering: Layering | null = null;
 
   constructor(configDirOverride?: string) {
     this.layers = resolveConfigLayers(configDirOverride);

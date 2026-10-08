@@ -141,6 +141,77 @@ describe.each([
     expect(read(org, "mcp-servers.json")).toBe(orgServers);
   });
 
+  it("keeps inherited credential policy live without copying it on a server write", async () => {
+    const orgData = JSON.parse(read(org, "mcp-servers.json"));
+    write(org, "mcp-servers.json", { ...orgData, credentialPolicy: "references" });
+    const orgBefore = read(org, "mcp-servers.json");
+    const servers = new Servers();
+    expect(await servers.getCredentialPolicy()).toBe("references");
+
+    await servers.add({ name: "notes", type: "stdio", command: "notes-mcp" });
+    expect(JSON.parse(read(identity, "mcp-servers.json"))).not.toHaveProperty("credentialPolicy");
+    expect(read(org, "mcp-servers.json")).toBe(orgBefore);
+
+    write(org, "mcp-servers.json", { ...orgData, credentialPolicy: "none" });
+    servers.clearCache();
+    expect(await servers.getCredentialPolicy()).toBe("none");
+  });
+
+  it.each(["literal", "references"] as const)("persists an explicit credential policy of %s", async (policy) => {
+    const orgData = JSON.parse(read(org, "mcp-servers.json"));
+    write(org, "mcp-servers.json", { ...orgData, credentialPolicy: "references" });
+    const orgBefore = read(org, "mcp-servers.json");
+    const servers = new Servers();
+
+    await servers.setCredentialPolicy(policy);
+    expect(JSON.parse(read(identity, "mcp-servers.json")).credentialPolicy).toBe(policy);
+    expect(read(org, "mcp-servers.json")).toBe(orgBefore);
+    expect(await new Servers().getCredentialPolicy()).toBe(policy);
+
+    write(org, "mcp-servers.json", { ...orgData, credentialPolicy: "none" });
+    servers.clearCache();
+    expect(await servers.getCredentialPolicy()).toBe(policy);
+  });
+
+  it("writes only the format fields and its own entries into a fresh write layer", async () => {
+    rmSync(join(identity, "mcp-profiles.json"));
+    const orgData = JSON.parse(read(org, "mcp-profiles.json"));
+    write(org, "mcp-profiles.json", { ...orgData, orgOnlySetting: "org" });
+    const orgBefore = read(org, "mcp-profiles.json");
+    const profiles = new Profiles();
+    await profiles.add({ name: "notes", servers: [] });
+    const written = JSON.parse(read(identity, "mcp-profiles.json"));
+    expect(Object.keys(written).sort()).toEqual(["apiVersion", "kind", "profiles"]);
+    expect(written).toMatchObject({ apiVersion: "aiwg.io/v1", kind: "McpProfileRegistry" });
+    expect(Object.keys(written.profiles)).toEqual(["notes"]);
+    expect(read(org, "mcp-profiles.json")).toBe(orgBefore);
+    expect(await new Profiles().load()).toMatchObject({ apiVersion: "aiwg.io/v1", kind: "McpProfileRegistry" });
+  });
+
+  it("persists owned, changed and new top-level fields while retaining fresh defaults", async () => {
+    const profiles = new Profiles();
+    const data = await profiles.load();
+    data.apiVersion = "aiwg.io/v2";
+    await profiles.add({ name: "notes", servers: [] });
+    expect(JSON.parse(read(identity, "mcp-profiles.json"))).toMatchObject({
+      apiVersion: "aiwg.io/v2", kind: "McpProfileRegistry",
+    });
+
+    rmSync(join(identity, "mcp-profiles.json"));
+    const fresh = new Profiles();
+    const freshData = await fresh.load();
+    freshData.apiVersion = "aiwg.io/v2";
+    await fresh.add({ name: "notes", servers: [] });
+    expect(JSON.parse(read(identity, "mcp-profiles.json"))).toHaveProperty("apiVersion", "aiwg.io/v2");
+
+    rmSync(join(org, "mcp-profiles.json"));
+    rmSync(join(identity, "mcp-profiles.json"));
+    await new Profiles().add({ name: "notes", servers: [] });
+    expect(JSON.parse(read(identity, "mcp-profiles.json"))).toMatchObject({
+      apiVersion: "aiwg.io/v1", kind: "McpProfileRegistry",
+    });
+  });
+
   it("refuses to remove an entry defined only in a lower layer", async () => {
     await expect(new Servers().remove("github")).rejects.toThrow('Server "github" is defined in a lower configuration layer; remove it there.');
     await expect(new Profiles().remove("org-base")).rejects.toThrow('Profile "org-base" is defined in a lower configuration layer; remove it there.');

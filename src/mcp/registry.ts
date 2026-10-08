@@ -1,4 +1,4 @@
-import { isLowerLayerEntry, loadLayered, resolveConfigLayers, writeLayerData } from './config-layers.mjs';
+import { type Layering, isLowerLayerEntry, loadLayered, resolveConfigLayers, writeLayerData } from './config-layers.mjs';
 import { manageOmpMcp } from './omp-config.mjs';
 import { manageGrokBuildMcp } from './grok-build-config.mjs';
 import { replaceServer } from './toml-editor.mjs';
@@ -146,7 +146,7 @@ export class McpServerRegistry {
 
   /** Configuration layers, lowest precedence first; null for a single directory */
   private readonly layers: string[] | null;
-  private layering: { lower: Map<string, string>; own: Set<string> } | null = null;
+  private layering: Layering | null = null;
 
   constructor(configDirOverride?: string) {
     this.layers = resolveConfigLayers(configDirOverride);
@@ -296,6 +296,7 @@ export class McpServerRegistry {
   async setCredentialPolicy(policy: McpCredentialPolicy): Promise<void> {
     const data = await this.load();
     data.credentialPolicy = policy;
+    this.layering?.ownFields.add('credentialPolicy');
     await this.save();
   }
 
