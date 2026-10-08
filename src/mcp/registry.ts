@@ -1,9 +1,10 @@
 import { type Layering, isLowerLayerEntry, loadLayered, resolveConfigLayers, writeLayerData } from './config-layers.mjs';
+import { assertConfigDestination, assertProjectCredentials, isUserMcpScope, writeConfigAtomic, writeConfigTransaction } from './config-file.mjs';
 import { manageOmpMcp } from './omp-config.mjs';
 import { manageGrokBuildMcp } from './grok-build-config.mjs';
 import { replaceServer } from './toml-editor.mjs';
 import { resolveOmpPaths } from '../providers/omp-paths.mjs';
-import { applyJsonToolFilterPlan, claudeSettingsPath, mergeClaudePermissions, planToolFilters, type ToolFilterPlan, type ToolFilters } from './tool-filters.mjs';
+import { applyJsonToolFilterPlan, claudeSettingsPath, prepareClaudePermissions, planToolFilters, type ToolFilterPlan, type ToolFilters } from './tool-filters.mjs';
 import { assertCredentialPolicy, renderCredentialMaps, validateEnvReferenceName, type McpCredentialPolicy } from './credentials.mjs';
 /**
  * MCP Server Registry
@@ -17,6 +18,7 @@ import { assertCredentialPolicy, renderCredentialMaps, validateEnvReferenceName,
 
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { dirname, resolve } from 'path';
+import { homedir } from 'os';
 import { resolveConfigDir } from '../config/user-config.js';
 import { getProviderDefinition } from '../providers/provider-definitions.js';
 
@@ -490,7 +492,7 @@ export function getProviderConfigPath(provider: InjectProvider, projectDir = '.'
     return resolve(homeDir, '.gemini/config/mcp_config.json');
   }
   if ((provider === 'claude-code' || provider === 'claude') && options.scope === 'user') {
-    return resolve(process.env.HOME || process.env.USERPROFILE || '', '.claude.json');
+    return resolve(process.env.HOME || process.env.USERPROFILE || homedir(), '.claude.json');
   }
   if ((provider === 'omp' || provider === 'oh-my-pi') && options.scope !== undefined && !['user', 'project'].includes(options.scope)) throw new Error('OMP MCP scope must be user or project');
   if ((provider === 'omp' || provider === 'oh-my-pi') && options.scope === 'user') return resolve(resolveOmpPaths().agentDir, 'mcp.json');
@@ -505,8 +507,8 @@ export function getProviderConfigPath(provider: InjectProvider, projectDir = '.'
     claude: resolve(projectDir, '.mcp.json'),
     cursor: resolve(projectDir, '.cursor/mcp.json'),
     factory: resolve(homeDir, '.factory/mcp.json'),
-    codex: resolve(homeDir, '.codex/config.toml'),
-    openai: resolve(homeDir, '.codex/config.toml'),
+    codex: process.env.CODEX_HOME ? resolve(process.env.CODEX_HOME, 'config.toml') : resolve(homeDir, '.codex/config.toml'),
+    openai: process.env.CODEX_HOME ? resolve(process.env.CODEX_HOME, 'config.toml') : resolve(homeDir, '.codex/config.toml'),
     'grok-build': options.scope === 'user'
       ? resolve(process.env.GROK_HOME || resolve(homeDir, '.grok'), 'config.toml')
       : resolve(projectDir, '.grok/config.toml'),
@@ -551,20 +553,26 @@ export async function injectServers(
     allServers = allServers.filter(s => serverFilter.includes(s.name));
   }
 
+  const toolPlan = options.toolFilters
+    ? planToolFilters(provider, allServers.map(server => server.name), options.toolFilters)
+    : null;
+  if (toolPlan) result.warnings = toolPlan.warnings;
   if (allServers.length === 0) {
     result.error = 'No servers to inject. Use "aiwg mcp add" first.';
     return result;
   }
 
-  const toolPlan = options.toolFilters
-    ? planToolFilters(provider, allServers.map(server => server.name), options.toolFilters)
-    : null;
-  if (toolPlan) result.warnings = toolPlan.warnings;
   assertCredentialPolicy(allServers, options.credentialPolicy);
 
+  const userScope = isUserMcpScope(provider, options.scope);
+  const projectRoot = userScope ? undefined : projectDir;
+  await assertConfigDestination(configPath, projectRoot);
+  if ((provider === 'claude-code' || provider === 'claude') && options.scope !== 'user') {
+    assertProjectCredentials(allServers, configPath);
+  }
   if (provider === 'omp' || provider === 'oh-my-pi') {
     try {
-      const managed = await manageOmpMcp(configPath, allServers, { dryRun });
+      const managed = await manageOmpMcp(configPath, allServers, { dryRun, userScope, projectRoot });
       if (!dryRun) for (const server of allServers) await registry.recordInjection(server.name, 'omp');
       return { ...result, ...managed };
     } catch (error) {
@@ -576,6 +584,7 @@ export async function injectServers(
     try {
       const managed = await manageGrokBuildMcp(configPath, allServers, {
         dryRun,
+        userScope,
         root: options.scope === 'user' ? dirname(dirname(configPath)) : resolve(projectDir),
       });
       if (!dryRun && !managed.error) for (const server of allServers) await registry.recordInjection(server.name, 'grok-build');
@@ -587,11 +596,11 @@ export async function injectServers(
 
   // Handle TOML-based providers (Codex/OpenAI) separately
   if (provider === 'codex' || provider === 'openai') {
-    return injectToml(registry, allServers, configPath, provider, dryRun, result, toolPlan);
+    return injectToml(registry, allServers, configPath, provider, dryRun, result, userScope, projectRoot, toolPlan);
   }
 
   // JSON-based providers
-  return injectJson(registry, allServers, configPath, provider, dryRun, result, toolPlan, { projectDir, scope: options.scope });
+  return injectJson(registry, allServers, configPath, provider, dryRun, result, userScope, projectRoot, toolPlan, { projectDir, scope: options.scope });
 }
 
 async function injectJson(
@@ -601,6 +610,8 @@ async function injectJson(
   provider: InjectProvider,
   dryRun: boolean,
   result: InjectResult,
+  userScope: boolean,
+  projectRoot?: string,
   toolPlan: ToolFilterPlan | null = null,
   location: { projectDir?: string; scope?: 'user' | 'project' } = {},
 ): Promise<InjectResult> {
@@ -643,15 +654,23 @@ async function injectJson(
   // Merge back
   const merged = { ...existing, [mcpKey]: newServers };
   if (toolPlan) {
-    applyJsonToolFilterPlan(merged, mcpKey, {
-      ...toolPlan,
-      serverFields: Object.fromEntries(Object.entries(toolPlan.serverFields).filter(([name]) => result.serversInjected.includes(name))),
-    });
+    applyJsonToolFilterPlan(merged, mcpKey, toolPlan);
   }
 
+  const isClaude = provider === 'claude-code' || provider === 'claude';
+  const settingsPath = isClaude ? claudeSettingsPath(location.projectDir, location.scope) : null;
+  const settings = settingsPath ? await prepareClaudePermissions(
+    settingsPath, toolPlan?.claudePermissions || { deny: [], allow: [] },
+    { userScope, projectRoot, managedDir: dirname(registry.getPath()), mcpPath: configPath },
+  ) : null;
+  if (settings?.active && settingsPath) result.settingsPath = settingsPath;
+  if (settings?.warnings.length) result.warnings = [...(result.warnings || []), ...settings.warnings];
+
   if (!dryRun) {
-    await mkdir(resolve(configPath, '..'), { recursive: true });
-    await writeFile(configPath, JSON.stringify(merged, null, 2) + '\n', 'utf-8');
+    await writeConfigTransaction([
+      { file: configPath, content: JSON.stringify(merged, null, 2) + '\n', options: { userScope, projectRoot } },
+      ...(settings?.writes || []),
+    ]);
 
     // Record injection in registry
     for (const server of servers) {
@@ -661,11 +680,6 @@ async function injectJson(
   }
 
 
-  if (toolPlan?.claudePermissions) {
-    const settingsPath = claudeSettingsPath(location.projectDir, location.scope);
-    await mergeClaudePermissions(settingsPath, toolPlan.claudePermissions, { dryRun });
-    result.settingsPath = settingsPath;
-  }
   return result;
 }
 
@@ -676,6 +690,8 @@ async function injectToml(
   provider: InjectProvider,
   dryRun: boolean,
   result: InjectResult,
+  userScope: boolean,
+  projectRoot?: string,
   toolPlan: ToolFilterPlan | null = null,
 ): Promise<InjectResult> {
   let existing = '';
@@ -694,8 +710,7 @@ async function injectToml(
   }
 
   if (!dryRun) {
-    await mkdir(resolve(configPath, '..'), { recursive: true });
-    await writeFile(configPath, existing, 'utf-8');
+    await writeConfigAtomic(configPath, existing, { userScope, projectRoot });
 
     for (const server of servers) {
       await registry.recordInjection(server.name, provider);

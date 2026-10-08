@@ -10,19 +10,26 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, lstatSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { homedir } from "os";
-import { join, resolve } from "node:path";
-import { writeProfileConfig } from "../../../src/mcp/adapters/codex-runtime.js";
+import { join, resolve, sep } from "node:path";
+import { stripMcpServers } from "../../../src/mcp/toml-strip-mcp.mjs";
+import { parseTOML } from "toml-eslint-parser";
+import { ensureRuntimeHome, writeProfileConfig, launchWithProfile, loginInProfile, removeRuntimeHome } from "../../../src/mcp/adapters/codex-runtime.js";
 
 vi.mock("os", async importOriginal => {
   const os = await importOriginal<typeof import("os")>();
   return { ...os, homedir: vi.fn(() => os.tmpdir()) };
 });
+vi.mock("child_process", async importOriginal => {
+  const childProcess = await importOriginal<typeof import("child_process")>();
+  return { ...childProcess, spawnSync: vi.fn(() => ({ status: 0 })) };
+});
 
-import { McpServerRegistry, injectServers, buildServerConfig, buildServerToml, type McpServerDefinition, type InjectProvider } from "../../../src/mcp/registry.js";
-import { McpServerRegistry as RuntimeRegistry, injectServers as runtimeInjectServers, buildServerConfig as runtimeBuildServerConfig, buildServerToml as runtimeBuildServerToml } from "../../../src/mcp/registry.mjs";
+import { McpServerRegistry, injectServers, getProviderConfigPath, buildServerConfig, buildServerToml, type McpServerDefinition, type InjectProvider } from "../../../src/mcp/registry.js";
+import { McpServerRegistry as RuntimeRegistry, injectServers as runtimeInjectServers, getProviderConfigPath as runtimeGetProviderConfigPath, buildServerConfig as runtimeBuildServerConfig, buildServerToml as runtimeBuildServerToml } from "../../../src/mcp/registry.mjs";
 import {
   assertCredentialPolicy,
   credentialPolicyViolations,
@@ -113,6 +120,34 @@ describe("Codex runtime-home config permissions", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("uses CODEX_HOME for persistent and runtime paths without changing HOME", async () => {
+    const codexDir = join(root, "custom-codex");
+    vi.stubEnv("CODEX_HOME", codexDir);
+    mkdirSync(codexDir);
+    writeFileSync(join(codexDir, "config.toml"), 'model = "custom-home"\n');
+    for (const getPath of [getProviderConfigPath, runtimeGetProviderConfigPath]) {
+      for (const provider of ["codex", "openai"] as const) {
+        expect(getPath(provider, root)).toBe(join(codexDir, "config.toml"));
+      }
+    }
+    await writeProfileConfig("custom-home", []);
+    expect(readFileSync(join(codexDir, "roles-runtime/custom-home/config.toml"), "utf-8"))
+      .toContain('model = "custom-home"');
+    expect(existsSync(join(root, ".codex"))).toBe(false);
+  });
+
+  it("launches and logs in with the profile CODEX_HOME rather than an inherited home", async () => {
+    const runtimeHome = await ensureRuntimeHome("isolated");
+    vi.mocked(spawnSync).mockClear();
+    launchWithProfile("isolated", ["--version"]);
+    await loginInProfile("isolated");
+    expect(spawnSync).toHaveBeenCalledTimes(2);
+    for (const [, , options] of vi.mocked(spawnSync).mock.calls) {
+      expect(options?.env?.HOME).toBe(runtimeHome);
+      expect(options?.env?.CODEX_HOME).toBe(runtimeHome);
+    }
+  });
+
   it.each([false, true])("writes owner-only config.toml (pre-existing: %s)", async preExisting => {
     const configPath = join(root, ".codex", "roles-runtime", "test-profile", "config.toml");
     if (preExisting) {
@@ -120,12 +155,133 @@ describe("Codex runtime-home config permissions", () => {
       writeFileSync(configPath, "old config");
       if (process.platform !== "win32") chmodSync(configPath, 0o644);
     }
+    const before = preExisting ? statSync(configPath) : null;
     await writeProfileConfig("test-profile", [{
       name: "remote", type: "http", url: "https://example.test/mcp",
       headers: { Authorization: "Bearer synthetic" },
     }]);
     expect(readFileSync(configPath, "utf-8")).toContain("Bearer synthetic");
-    if (process.platform !== "win32") expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    if (before) expect(statSync(configPath).ino).not.toBe(before.ino);
+    expect(readdirSync(join(configPath, ".."))).toEqual(["config.toml"]);
+    if (process.platform !== "win32") {
+      expect(statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(statSync(join(configPath, "..")).mode & 0o777).toBe(0o700);
+    }
+  });
+});
+
+describe("Codex global MCP subtree isolation", () => {
+  let root: string;
+  const baseForms = [
+    'mcp_servers = { x = { url = "https://base.example/mcp", http_headers = { Authorization = "Bearer base-secret" } } }',
+    'mcp_servers.x.url = "https://base.example/mcp"\nmcp_servers.x.http_headers.Authorization = "Bearer base-secret"',
+    '[mcp_servers]\nx = { url = "https://base.example/mcp", http_headers = { Authorization = "Bearer base-secret" } }',
+    '["mcp_servers"."x"]\nurl = "https://base.example/mcp"\nhttp_headers = { Authorization = "Bearer base-secret" }',
+    "[ 'mcp_servers' . 'x' ]\nurl = 'https://base.example/mcp'\nhttp_headers = { Authorization = 'Bearer base-secret' }",
+    '[[ mcp_servers.x ]]\nurl = "https://base.example/mcp"\nhttp_headers = { Authorization = "Bearer base-secret" }',
+    '[mcp_servers.x.http_headers]\nAuthorization = "Bearer base-secret"',
+    '"mcp_\\u0073ervers".x.url = "https://base.example/mcp"\n"mcp_servers".x.http_headers.Authorization = "Bearer base-secret"',
+    'mcp_servers = {\n x = { url = "https://base.example/mcp",\n http_headers = { Authorization = "Bearer base-secret" } }\n}',
+    '[mcp_servers.x]\nargs = [\n "https://base.example/mcp", # ] not a delimiter\n "Bearer base-secret",\n]\nnotes = """\n[preferences]\nBearer base-secret\n"""',
+    "[mcp_servers.x]\nnotes = '''\n[preferences]\nBearer base-secret\n'''",
+  ];
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "aiwg-codex-strip-"));
+    vi.stubEnv("HOME", root);
+    vi.stubEnv("USERPROFILE", root);
+    vi.stubEnv("CODEX_HOME", join(root, ".codex"));
+    vi.mocked(homedir).mockReturnValue(root);
+    mkdirSync(join(root, ".codex"));
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('supports a symlinked global .codex home while keeping runtime directories private', async () => {
+    rmSync(join(root, '.codex'), { recursive: true });
+    const target = join(root, 'dotfiles-codex');
+    mkdirSync(target);
+    symlinkSync(target, join(root, '.codex'));
+    writeFileSync(join(target, 'config.toml'), 'model = "keep"\n');
+    await ensureRuntimeHome('test');
+    await writeProfileConfig('test', []);
+    expect(readFileSync(join(target, 'roles-runtime/test/config.toml'), 'utf-8')).toContain('model = "keep"');
+    expect(statSync(join(target, 'roles-runtime/test')).mode & 0o777).toBe(0o700);
+  });
+
+  it.each(['..', '../escape', 'nested/name', 'nested\\name', '/absolute', ''])('rejects unsafe runtime profile name %s before filesystem access', async profile => {
+    await expect(ensureRuntimeHome(profile)).rejects.toThrow(/Invalid profile name/);
+    await expect(writeProfileConfig(profile, [])).rejects.toThrow(/Invalid profile name/);
+    expect(() => launchWithProfile(profile)).toThrow(/Invalid profile name/);
+    await expect(loginInProfile(profile)).rejects.toThrow(/Invalid profile name/);
+    await expect(removeRuntimeHome(profile)).rejects.toThrow(/Invalid profile name/);
+    expect(readdirSync(join(root, '.codex'))).toEqual([]);
+  });
+
+  it.each(['\n', '\r\n'])('preserves unrelated multiline MCP-looking text with %j endings', newline => {
+    const base = ['model = "keep"', 'notes = """', '[mcp_servers.fake]', '"""',
+      "literal = '''", '[mcp_servers.other]', "'''", '[preferences]', 'keep = true', ''].join(newline);
+    expect(stripMcpServers(base)).toBe(base);
+    expect(stripMcpServers(base + '[mcp_servers.old]' + newline + 'command = "remove"' + newline)).toBe(base);
+  });
+
+  it.each(baseForms.flatMap(base => ["none", "references"].map(policy => ({ base, policy }))))(
+    "removes the complete base MCP subtree under $policy: $base", async ({ base, policy }) => {
+      const safe = 'model = "keep-model"\nnotes = """\n[mcp_servers.fake]\nnot a header\n"""\n';
+      const tail = '\n[preferences]\nkeep = [\n "one",\n { text = "[mcp_servers.fake]" },\n]\n';
+      writeFileSync(join(root, ".codex/config.toml"), safe + base + tail);
+      const selected: McpServerDefinition = { name: "selected", type: "http", url: "https://selected.example/mcp",
+        ...(policy === "references" ? { headerEnv: { Authorization: "SELECTED_TOKEN" } } : {}) };
+      await writeProfileConfig("test", [selected], { credentialPolicy: policy as "none" | "references" });
+      const completed = readFileSync(join(root, ".codex/roles-runtime/test/config.toml"), "utf-8");
+      expect(completed).toContain(safe.trimEnd());
+      expect(completed).toContain(tail.trimEnd());
+      expect(completed).toContain('[mcp_servers.selected]');
+      expect(completed).not.toContain("base.example");
+      expect(completed).not.toContain("base-secret");
+      expect(completed).not.toMatch(/mcp_servers[.\"]+x/);
+      const tables = parseTOML(completed, { tomlVersion: '1.1.0' }).body[0].body;
+      expect(tables.filter(node => node.type === 'TOMLTable' && node.resolvedKey[0] === 'mcp_servers')
+        .map(node => node.type === 'TOMLTable' ? node.resolvedKey : [])).toEqual([['mcp_servers', 'selected']]);
+      if (policy === "references") expect(completed).toContain('Authorization = "SELECTED_TOKEN"');
+    },
+  );
+
+  it.each([
+    'notes = """unterminated', "notes = '''unterminated", 'notes = "unterminated',
+    'args = ["one",', 'args = { x = ["one" }', '[mcp_servers.x',
+    'not a TOML key/value', 'model = "ok" mcp_servers.x.url = "base-secret"',
+    'mcp_servers = { x = { url = "base-secret" }',
+  ])("fails closed on malformed base config: %s", async base => {
+    writeFileSync(join(root, ".codex/config.toml"), base);
+    const destination = join(root, ".codex/roles-runtime/test/config.toml");
+    mkdirSync(join(destination, ".."), { recursive: true });
+    writeFileSync(destination, "previous-runtime");
+    await expect(writeProfileConfig("test", [], { credentialPolicy: "none" })).rejects.toThrow(/Refusing to copy base Codex config/);
+    expect(readFileSync(destination, "utf-8")).toBe("previous-runtime");
+    expect(readdirSync(join(destination, ".."))).toEqual(["config.toml"]);
+  });
+
+  it.each(["home", "config", "parent", "dangling-home", "dangling-config"])("refuses symlinked runtime %s", async kind => {
+    const runtime = join(root, ".codex/roles-runtime/test");
+    const outside = join(root, "outside");
+    if (!kind.startsWith("dangling")) mkdirSync(outside);
+    if (kind === "parent") symlinkSync(outside, join(root, ".codex/roles-runtime"));
+    else if (kind.endsWith("home")) {
+      mkdirSync(join(runtime, ".."));
+      symlinkSync(outside, runtime);
+    } else {
+      mkdirSync(runtime, { recursive: true });
+      if (kind === "config") writeFileSync(join(outside, "config.toml"), "untouched");
+      symlinkSync(join(outside, "config.toml"), join(runtime, "config.toml"));
+    }
+    await expect(ensureRuntimeHome("test")).rejects.toThrow(/symlink/);
+    await expect(writeProfileConfig("test", [])).rejects.toThrow(/symlink/);
+    if (kind === "config") expect(readFileSync(join(outside, "config.toml"), "utf-8")).toBe("untouched");
+    else if (!kind.startsWith("dangling")) expect(readdirSync(outside)).toEqual([]);
+    expect(lstatSync(kind === "parent" ? join(root, ".codex/roles-runtime") : kind.endsWith("home") ? runtime : join(runtime, "config.toml")).isSymbolicLink()).toBe(true);
   });
 
   it("renders credentials and filters in the same server table and returns unsupported-filter warnings", async () => {
@@ -153,7 +309,8 @@ describe("Codex runtime-home config permissions", () => {
       credentialPolicy: "none",
       toolFilters: { deny: ["tracker__delete"], allow: [] },
     })).rejects.toThrow(/Refusing to render/);
-    expect(existsSync(join(root, ".codex"))).toBe(false);
+    expect(existsSync(join(root, ".codex", "roles-runtime"))).toBe(false);
+    expect(readdirSync(join(root, ".codex"))).toEqual([]);
   });
 
   describe.each([
@@ -165,8 +322,9 @@ describe("Codex runtime-home config permissions", () => {
       await registry.add({ name: "remote", type: "http", url: "https://example.test/mcp", headerEnv: { Authorization: "TOKEN" } });
       const result = await inject(registry, provider, {
         projectDir: root, credentialPolicy: "references",
-        toolFilters: { deny: ["remote__delete"], allow: ["remote__list"] },
+        toolFilters: { deny: ["remote__delete"], allow: provider === "claude-code" ? [] : ["remote__list"] },
       });
+      expect(result.configPath.startsWith(root + sep)).toBe(true);
       const text = readFileSync(result.configPath, "utf-8");
       if (provider === "codex") {
         expect(text).toContain('env_http_headers = { Authorization = "TOKEN" }');
@@ -181,10 +339,10 @@ describe("Codex runtime-home config permissions", () => {
           expect(config.mcpServers.remote.headers.Authorization).toBe("${TOKEN}");
           if (provider === "factory") expect(config.mcpServers.remote.disabledTools).toEqual(["delete"]);
           else expect(JSON.parse(readFileSync(result.settingsPath!, "utf-8")).permissions)
-            .toEqual({ deny: ["mcp__remote__delete"], allow: ["mcp__remote__list"] });
+            .toEqual({ deny: ["mcp__remote__delete"] });
         }
       }
-      expect(result.warnings?.length).toBe(provider === "factory" || provider === "claude-code" ? 1 : 0);
+      expect(result.warnings?.length).toBe(provider === "factory" ? 1 : 0);
     });
 
     it("refuses credentials before writing either Claude file", async () => {
@@ -244,6 +402,24 @@ describe("aiwg mcp inject credential flags", () => {
       servers: Object.fromEntries(entries.map(entry => [entry.name, entry])),
     }));
   }
+
+  it.each(['references', 'none'])('refuses malformed URL userinfo under %s without writing or printing it', policy => {
+    registry([{ name: 'remote', type: 'http', url: 'https://user:malformed-canary@bad host/mcp' }], policy);
+    const failure = runFailing(['inject', '--provider', 'codex']);
+    expect(failure.stderr).toContain('url userinfo');
+    expect(failure.stderr).not.toContain('malformed-canary');
+    expect(existsSync(join(root, 'home/.codex/config.toml'))).toBe(false);
+  });
+
+  it.each(['auth', 'oauth'])('refuses userinfo in OMP %s tokenUrl under references', field => {
+    registry([{ name: 'remote', type: 'http', url: 'https://example.test/mcp',
+      [field]: { ...(field === 'auth' ? { type: 'oauth' } : {}), tokenUrl: 'https://client:oauth-canary@idp.example/token' },
+    }], 'references');
+    const failure = runFailing(['inject', '--provider', 'omp']);
+    expect(failure.stderr).toContain(`${field}.tokenUrl userinfo`);
+    expect(failure.stderr).not.toContain('oauth-canary');
+    expect(existsSync(join(projectDir, '.omp/mcp.json'))).toBe(false);
+  });
 
   it("--strict-credentials renders references and never the variable's value", () => {
     registry([{ name: "tracker", type: "http", url: "https://tracker.example/mcp", headerEnv: { Authorization: "TRACKER_AUTHORIZATION" } }]);
