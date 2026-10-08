@@ -13,14 +13,57 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
   precedence first, so an organisation base and a per-identity overlay can be kept apart. Writes go to
   the last directory only. Profiles gain `extends` (`aiwg mcp profile add --extends`), resolved across
   layers by `aiwg mcp inject --profile`, including `--ephemeral`.
+- MCP profile tool filters (`providerOverrides.toolDeny` / `toolAllow`) are now rendered by
+  `aiwg mcp inject --profile`. They were stored and printed by `aiwg mcp profile show` but never
+  written to any provider config. Claude Code receives permission rules, Codex
+  `disabled_tools`/`enabled_tools`, opencode its `tools` map, and Factory, Windsurf and Antigravity
+  `disabledTools`. A filter a provider cannot express is printed as a warning. `aiwg mcp profile add`
+  and `edit` accept `--tool-deny`, `--tool-allow`, `--provider` and `--clear-tool-filters`.
+- `aiwg mcp inject` renders `--header-env` references in each harness's own syntax, and a new
+  `--env-from NAME=VAR` does the same for stdio server variables. Previously only OMP and Grok Build
+  rendered references; Claude Code, Cursor, Windsurf, Factory and opencode dropped them, and Codex
+  dropped env and headers entirely. Antigravity and Warp refuse references because neither documents
+  interpolation.
+- Credential policy: `--strict-credentials` refuses literal `env`/`headers` values, `--no-credentials`
+  refuses any credential-bearing field. Also settable with `AIWG_MCP_CREDENTIAL_POLICY` or
+  `aiwg mcp credential-policy`.
 
 ### Fixed
 
+- opencode local servers now receive their variables as `environment`, the key opencode reads, instead
+  of `env`.
 - `aiwg mcp inject --provider claude` and `aiwg mcp install claude` now write project MCP servers to
   `.mcp.json`. They previously wrote `mcpServers` into `.claude/settings.local.json`, which Claude Code
   does not read, so injected servers never loaded. `--scope user` writes `~/.claude.json`. HTTP and SSE
   entries now carry `type`, without which Claude Code skips a `url` entry. `--ephemeral` output now uses
   each provider's own entry shape instead of a generic one.
+  Project-scope injection of literal env or header values now warns, naming only the keys, because
+  `.mcp.json` is meant to be committed.
+- Ephemeral and Codex runtime-home MCP configs use 0600 permissions; default ephemeral files use a private temp
+  directory, and `aiwg mcp list` redacts URL userinfo.
+
+## [2026.10.1] - 2026-10-05 - "Turnkey Jev decision offload"
+
+### Added
+
+- Turnkey Jev decision offload (#2862). `aiwg decision setup jev --token-stdin --verify`
+  stores a Jev token in a user-level 0600 credential file
+  (`~/.config/aiwg/credentials/jev.json`), records the opt-in, and checks it with one
+  live call. `aiwg decision ask --question "<q>" (--yes-no | --choices id=meaning,... |
+  --scale 1-5)` sends one bounded decision to Jev and returns
+  `aiwg-decision-ask/v1` JSON. Abstentions, errors, timeouts, a missing setup, and
+  confidence below `--threshold` (default 0.8) all return `fallback: "llm"`, which
+  means the agent decides as usual. The MCP `decision` toolset adds `decision-ask`.
+  The decision-engine addon ships the `decision-offload` rule and skill, which send
+  agents' bounded decisions to Jev first. The steward, aiwg-utils quickref, and
+  language map now route "set up jev". The quickstart is
+  `docs/decision/jev-quickstart.md`.
+
+### Fixed
+
+- The Jev adapter rejected valid Score responses whose two-decimal probability
+  rounding moved the weighted mean by 0.02 or more (live `jev-1.13.0`: mean 3.98,
+  score 3.96). The tolerance now covers that rounding.
 
 ## [2026.10.0] - 2026-10-02 - "Muse Code stable, gates and decision studies"
 

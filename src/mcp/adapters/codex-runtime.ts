@@ -15,12 +15,14 @@
  * @implements #892
  */
 
-import { readFile, writeFile, mkdir, symlink, access, readdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, symlink, access, readdir, chmod } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { existsSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
-import type { McpServerDefinition } from '../registry.js';
+import { buildServerToml, type McpServerDefinition } from '../registry.js';
+import { assertCredentialPolicy, type McpCredentialPolicy } from '../credentials.mjs';
+import { planToolFilters, type ToolFilters } from '../tool-filters.mjs';
 
 // ─────────────────────────────────────────────
 // Types
@@ -120,7 +122,12 @@ export async function ensureRuntimeHome(
 export async function writeProfileConfig(
   profile: string,
   servers: McpServerDefinition[],
-): Promise<void> {
+  options: { credentialPolicy?: McpCredentialPolicy; toolFilters?: ToolFilters } = {},
+): Promise<string[]> {
+  assertCredentialPolicy(servers, options.credentialPolicy);
+  const toolPlan = options.toolFilters
+    ? planToolFilters('codex', servers.map((server) => server.name), options.toolFilters)
+    : null;
   const rtHome = runtimeHomePath(profile);
   await mkdir(rtHome, { recursive: true });
 
@@ -138,39 +145,18 @@ export async function writeProfileConfig(
   }
 
   // Build profile-specific [mcp_servers.*] TOML sections
-  const mcpSections: string[] = [];
-  for (const server of servers) {
-    const lines: string[] = [`[mcp_servers.${server.name}]`];
-    if (server.type === 'stdio') {
-      lines.push(`command = "${server.command}"`);
-      if (server.args && server.args.length > 0) {
-        const argsStr = server.args.map((a) => `"${a}"`).join(', ');
-        lines.push(`args = [${argsStr}]`);
-      }
-      if (server.env) {
-        for (const [k, v] of Object.entries(server.env)) {
-          lines.push(`env.${k} = "${v}"`);
-        }
-      }
-    } else {
-      lines.push(`url = "${server.url}"`);
-      if (server.headers) {
-        for (const [k, v] of Object.entries(server.headers)) {
-          lines.push(`headers.${k} = "${v}"`);
-        }
-      }
-    }
-    lines.push(`startup_timeout_sec = 10.0`);
-    lines.push(`tool_timeout_sec = 60.0`);
-    mcpSections.push(lines.join('\n'));
-  }
+  const mcpSections = servers.map((server) =>
+    [buildServerToml(server), ...(toolPlan?.tomlLines[server.name] ?? [])].join('\n'));
 
   const configContent =
     (baseConfig ? baseConfig + '\n\n' : '') +
     mcpSections.join('\n\n') +
     '\n';
 
-  await writeFile(runtimeConfigPath(profile), configContent, 'utf-8');
+  const configPath = runtimeConfigPath(profile);
+  await writeFile(configPath, configContent, { encoding: 'utf-8', mode: 0o600 });
+  await chmod(configPath, 0o600);
+  return toolPlan?.warnings ?? [];
 }
 
 /**

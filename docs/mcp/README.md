@@ -138,6 +138,75 @@ aiwg mcp inject --provider claude --profile acme-dev --ephemeral --out /tmp/acme
 Injection records (`injectedProviders`, used by `inject --all`) for a server defined in a lower layer
 are not persisted, so that the last layer holds no copy of an unchanged organisation entry.
 
+## Profile Tool Filters
+
+A profile can deny or allow individual tools. Patterns name a tool as `<server>__<tool>`; `<tool>` may
+contain `*`, and `<server>__*` covers the whole server. The `*` provider key applies to every
+provider, and a provider's own key adds to it:
+
+```bash
+aiwg mcp profile edit dev --tool-deny git-gitea__delete_repo
+aiwg mcp profile edit dev --provider codex --tool-allow git-gitea__list_repos,git-gitea__get_file
+aiwg mcp profile edit dev --provider codex --clear-tool-filters
+```
+
+`aiwg mcp inject --profile <p>` renders the filters into each provider's own setting. Anything a
+provider cannot express is printed as a `WARNING` line on stderr; it is not applied.
+
+| Provider | toolDeny | toolAllow | Globs |
+| --- | --- | --- | --- |
+| Claude Code | `permissions.deny`: `mcp__<server>__<tool>` | `permissions.allow` (pre-approval) | yes |
+| Codex | `disabled_tools`; `enabled = false` for `<server>__*` | `enabled_tools` | no |
+| opencode | `tools` map entry `<server>_<tool>: false` | `<server>_*: false`, then each tool `true` | yes |
+| Factory, Antigravity | `disabledTools`; `disabled: true` for `<server>__*` | not supported | no |
+| Windsurf | `disabledTools` | not supported | no |
+| Cursor, Warp, OMP, Grok Build | not supported | not supported | |
+
+Claude Code reads permission rules from settings, not from the MCP file: persistent injection adds
+them to `.claude/settings.local.json` (`~/.claude/settings.json` with `--scope user`) and keeps the
+rules already there. `--ephemeral --out run.json` also writes `run.settings.json` and prints
+`claude --mcp-config run.json --settings run.settings.json`. `aiwg session --provider codex
+--profile <p>` writes the Codex filters into the profile's runtime config.
+
+## Credentials in Injected Servers
+
+A registry entry can carry a credential as a literal value (`--env`, `--headers`) or as a reference to an
+environment variable (`--header-env HEADER=VAR`, `--env-from NAME=VAR`). A reference writes only the
+variable name; the harness reads the value when it starts the server. Each harness spells a reference
+differently:
+
+| Harness | `--header-env` / `--env-from` renders as |
+| --- | --- |
+| Claude Code | `${VAR}` |
+| Cursor, Windsurf | `${env:VAR}` |
+| Factory | `${VAR}` |
+| opencode | `{env:VAR}` |
+| OMP, Grok Build | `${VAR}` |
+| Codex | `env_http_headers = { HEADER = "VAR" }` and `env_vars = ["VAR"]` |
+| Antigravity, Warp | refused: neither documents interpolation in its MCP config |
+
+Codex forwards a variable only under its own name, so `--env-from` for Codex must map `VAR=VAR`.
+Claude Code reads `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `NPM_TOKEN` as empty in a remote
+server's URL and headers, so do not reference those.
+
+The credential policy decides what `aiwg mcp inject` will render:
+
+| Policy | Flag | Renders |
+| --- | --- | --- |
+| `literal` (default) | none | everything |
+| `references` | `--strict-credentials` | references only; refuses literal credentials |
+| `none` | `--no-credentials` | refuses every credential-bearing field, references included |
+
+`references` refuses literal `env`/`headers`, URL userinfo and OAuth client secrets.
+
+A refusal names each server and field, exits non-zero and writes nothing, including in `--ephemeral`
+mode. Precedence is the flag, then `AIWG_MCP_CREDENTIAL_POLICY`, then the registry default set with
+`aiwg mcp credential-policy <policy>`. `aiwg session --provider codex --profile <p>` applies the same
+policy to the profile's runtime config.
+
+Ephemeral and Codex runtime-home configs are written owner-only (0600). Persistent project files such as
+`.mcp.json` should hold credential references rather than literal secrets.
+
 ## Technical Details
 
 - **Transport:** stdio (standard input/output)
