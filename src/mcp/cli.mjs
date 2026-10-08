@@ -826,6 +826,16 @@ async function handleInject(args) {
       console.log(`  ${prefix}Injected: ${result.serversInjected.join(', ')}`);
       totalInjected += result.serversInjected.length;
     }
+    if ((p === 'claude' || p === 'claude-code') && scope !== 'user') {
+      for (const name of result.serversInjected) {
+        const server = await registry.get(name);
+        if (!server) continue;
+        const names = [...Object.keys(server.env || {}), ...Object.keys(server.headers || {})];
+        if (names.length > 0) {
+          console.warn(`  ${prefix}WARNING: ${name} writes literal env/header values (${names.join(', ')}) to ${result.configPath}, which Claude Code shares through version control. Use --scope user or keep the file out of git.`);
+        }
+      }
+    }
     if (result.alreadyPresent.length > 0) {
       console.log(`  ${prefix}Updated in place: ${result.alreadyPresent.join(', ')}`);
     }

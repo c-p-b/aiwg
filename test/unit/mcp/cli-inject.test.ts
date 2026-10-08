@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -37,6 +37,17 @@ function runCli(args: string[]) {
   });
 }
 
+function runCliWithOutput(args: string[]) {
+  const result = spawnSync(process.execPath, [cliPath, ...args], {
+    cwd: projectDir,
+    encoding: "utf-8",
+    timeout: 60_000,
+    env: { PATH: process.env.PATH, HOME: homeDir, AIWG_CONFIG: configDir, TMPDIR: root },
+  });
+  if (result.error) throw result.error;
+  return { stdout: result.stdout, stderr: result.stderr, status: result.status };
+}
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "aiwg-mcp-cli-"));
   configDir = join(root, "config");
@@ -63,6 +74,36 @@ describe("aiwg mcp inject --provider claude", () => {
         local: { command: "synthetic-command", args: ["--flag"] },
       },
     });
+  });
+
+  it("warns about literal env and header values without printing them", () => {
+    writeRegistry({
+      local: { name: "local", type: "stdio", command: "synthetic-command", env: { API_TOKEN: "canary-value-123" } },
+      remote: { name: "remote", type: "http", url: "https://synthetic.example/mcp", headers: { Authorization: "Bearer canary-hdr-456" } },
+    });
+
+    const result = runCliWithOutput(["inject", "--provider", "claude"]);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("local writes literal env/header values (API_TOKEN)");
+    expect(result.stderr).toContain("remote writes literal env/header values (Authorization)");
+    expect(result.stderr).toContain(".mcp.json");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("canary-value-123");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("canary-hdr-456");
+  });
+
+  it("does not warn for user-scope injection", () => {
+    writeRegistry({
+      local: { name: "local", type: "stdio", command: "synthetic-command", env: { API_TOKEN: "canary-value-123" } },
+    });
+    const result = runCliWithOutput(["inject", "--provider", "claude", "--scope", "user"]);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("WARNING:");
+  });
+
+  it("does not warn for servers without literal env or headers", () => {
+    const result = runCliWithOutput(["inject", "--provider", "claude"]);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("WARNING:");
   });
 
   it("writes an ephemeral --mcp-config file in Claude Code's entry shape", () => {
