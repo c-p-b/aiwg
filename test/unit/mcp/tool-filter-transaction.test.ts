@@ -61,6 +61,7 @@ describe.each([
     const registry = new Registry(join(root, 'config'));
     await registry.add({ name: 'git', type: 'stdio', command: 'git-mcp' });
     mkdirSync(join(root, 'config', 'claude-tool-permissions'));
+    failure.calls = [];
     const before = snapshot(root);
     failure.unwritable = true;
     await expect(inject(registry, 'claude', { projectDir: join(root, 'project'), toolFilters: filters }))

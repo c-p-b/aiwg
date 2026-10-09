@@ -5,6 +5,25 @@ import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getMcpInjectionDefinition } from '../providers/provider-definitions.mjs';
 
+export async function assertNoSymlinkParents(file, configRoot = dirname(resolve(file))) {
+  const root = resolve(configRoot);
+  const rel = relative(root, resolve(file));
+  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`MCP config ${file} must be beneath the config directory ${root}`);
+  }
+  let parent = dirname(resolve(file));
+  while (parent !== root) {
+    try {
+      if ((await lstat(parent)).isSymbolicLink()) {
+        throw new Error(`Refusing to write MCP config ${file}: parent directory is a symlink`);
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    parent = dirname(parent);
+  }
+}
+
 export async function assertConfigDestination(file, projectRoot) {
   if (projectRoot) {
     const root = resolve(projectRoot);
@@ -57,7 +76,8 @@ export function assertConfigObject(config, serversKey) {
   }
 }
 
-export async function writeConfigAtomic(file, content, { userScope = false, projectRoot, newFileMode, mode: restoreMode } = {}) {
+export async function writeConfigAtomic(file, content, { userScope = false, projectRoot, newFileMode, mode: restoreMode, rejectSymlinkParents = false, symlinkRoot } = {}) {
+  if (rejectSymlinkParents) await assertNoSymlinkParents(file, symlinkRoot);
   const info = await assertConfigDestination(file, projectRoot);
   const mode = restoreMode ?? (userScope ? 0o600 : info ? info.mode & 0o7777 : newFileMode ?? 0o666);
   await mkdir(dirname(file), { recursive: true });
@@ -70,6 +90,7 @@ export async function writeConfigAtomic(file, content, { userScope = false, proj
     await handle.sync();
     await handle.close();
     handle = undefined;
+    if (rejectSymlinkParents) await assertNoSymlinkParents(file, symlinkRoot);
     await assertConfigDestination(file, projectRoot);
     await rename(temporary, file);
   } finally {

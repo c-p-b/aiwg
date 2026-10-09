@@ -105,6 +105,7 @@ vi.mock('../../../../src/cli/handlers/use.js', () => ({
   useHandler: { execute: mockUseExecute },
 }));
 
+import { resolveProfileExtends } from '../../../../src/mcp/config-layers.mjs';
 import { sessionHandler } from '../../../../src/cli/handlers/session.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -272,6 +273,20 @@ describe('sessionHandler Codex profile credential policy', () => {
     expect(mockWriteProfileConfig).not.toHaveBeenCalled();
     expect(mockLaunchWithProfile).not.toHaveBeenCalled();
     expect(mockSpawnSync.mock.calls.some(([command]) => command === 'codex')).toBe(false);
+  });
+
+  it('passes inherited denies from a resolved profile into Codex runtime rendering', async () => {
+    mockResolveServers.mockResolvedValue([{ name: 'safe', type: 'stdio', command: 'safe' }]);
+    mockResolveProfile.mockResolvedValue(resolveProfileExtends('test', {
+      base: { servers: ['safe'], providerOverrides: { '*': { toolDeny: ['safe__delete'] } } },
+      test: { servers: [], extends: ['base'], providerOverrides: {} },
+    }));
+    const result = await sessionHandler.execute(makeCtx(['--provider', 'codex', '--profile', 'test', '--no-repair']));
+    expect(result.exitCode).toBe(0);
+    expect(mockResolveProfile).toHaveBeenCalledWith('test');
+    expect(mockWriteProfileConfig).toHaveBeenCalledWith('test', expect.any(Array), {
+      credentialPolicy: 'references', toolFilters: { allow: [], deny: ['safe__delete'] },
+    });
   });
 
   it('sets up and launches an allowed profile with tool filters', async () => {

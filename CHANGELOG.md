@@ -40,6 +40,26 @@ and this project uses [Calendar Versioning (CalVer)](https://calver.org/) with n
 
 ### Fixed
 
+- Layered MCP writes reject overlapping realpath targets and symlinked files or directories below the config root,
+  use atomic replacement, and refresh server/profile ownership after each successful save.
+- Profile imports validate the complete layered `extends` graph before writing, naming cycles and missing bases.
+- Layered credential policy uses the strictest value (`literal` < `references` < `none`) as a floor.
+  Higher layers, environment and rendering flags can only tighten it; relaxations warn and are ignored.
+  CLI policy-setting commands refuse values below the lower-layer floor. Maintainers can adjust that floor.
+  Inherited settings stay out of identity writes, including injection records, while format fields remain.
+- Credential rendering flags and environment values now only tighten even a single registry's policy,
+  changing #280 behavior. Relaxation warnings occur once per process per attempted value, and exported
+  `injectServers` enforces the stored floor even with an omitted or weaker policy option. Invalid present
+  policy values throw with the layer path; an empty environment string is treated as unset.
+- Explicit policy saves preserve the requested value, including one equal to the lower floor. Unrelated
+  saves preserve policy ownership and drop stale weaker overlay policies with a warning.
+- Empty profiles inject zero servers in persistent mode. Removing a profile extended by remaining profiles
+  is refused with dependent names. Copy-up removal immediately restores lower entries on the same instance,
+  and refused mutations leave cached data unchanged. Config directory aliases and symlinked ancestors work;
+  missing layer paths use filesystem-aware case comparisons to prevent overlap.
+- Regression coverage verifies inherited tool denies and credential references in Codex runtime configs
+  and Claude injection, with TypeScript and runtime registries exercising the same layered behaviour.
+
 - Claude profile settings preserve uncertain deny-rule ownership after manual edits, with a deny-array
   digest, tracked preservation and actionable warnings. Ownership follows realpath parent aliases;
   invalid records explain how to reset tracking. New project settings use `0600` and retain existing modes.

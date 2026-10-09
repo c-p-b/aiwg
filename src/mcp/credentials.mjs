@@ -147,14 +147,30 @@ export function assertCredentialPolicy(servers, policy) {
   throw new Error(`Refusing to render MCP servers with credentials: ${detail}. ${remedy}`);
 }
 
-/**
- * Resolve the effective policy. Precedence: CLI flag, then
- * AIWG_MCP_CREDENTIAL_POLICY, then the registry's credentialPolicy, then literal.
- */
+// Relaxations can be encountered repeatedly while loading layers and rendering.
+const warnedRelaxations = new Set();
+
+export function warnCredentialPolicyRelaxation(candidate, floor) {
+  if (warnedRelaxations.has(candidate)) return;
+  warnedRelaxations.add(candidate);
+  console.warn(`Ignoring MCP credential policy "${candidate}": cannot relax credential policy floor "${floor}".`);
+}
+
+/** Resolve the strictest policy; environment and flags may only tighten the registry floor. */
 export function resolveCredentialPolicy({ flag, registryPolicy, env = process.env } = {}) {
-  const policy = flag || env.AIWG_MCP_CREDENTIAL_POLICY || registryPolicy || 'literal';
-  if (!CREDENTIAL_POLICIES.includes(policy)) {
-    throw new Error(`Unknown MCP credential policy "${policy}". Use one of: ${CREDENTIAL_POLICIES.join(', ')}`);
+  let policy = 'literal';
+  // An empty environment string is unset; empty layer/flag values are errors.
+  const envPolicy = env.AIWG_MCP_CREDENTIAL_POLICY === '' ? undefined : env.AIWG_MCP_CREDENTIAL_POLICY;
+  for (const candidate of [registryPolicy, envPolicy, flag]) {
+    if (candidate === undefined) continue;
+    if (!CREDENTIAL_POLICIES.includes(candidate)) {
+      throw new Error(`Unknown MCP credential policy "${candidate}". Use one of: ${CREDENTIAL_POLICIES.join(', ')}`);
+    }
+    if (CREDENTIAL_POLICIES.indexOf(candidate) < CREDENTIAL_POLICIES.indexOf(policy)) {
+      warnCredentialPolicyRelaxation(candidate, policy);
+    } else {
+      policy = candidate;
+    }
   }
   return policy;
 }

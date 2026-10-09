@@ -26,3 +26,5 @@ export function resolveCredentialPolicy(options?: {
   registryPolicy?: string;
   env?: Record<string, string | undefined>;
 }): McpCredentialPolicy;
+
+export function warnCredentialPolicyRelaxation(candidate: McpCredentialPolicy, floor: McpCredentialPolicy): void;

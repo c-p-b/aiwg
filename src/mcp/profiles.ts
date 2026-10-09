@@ -10,8 +10,9 @@
  * @implements #889
  */
 
-import { type Layering, isLowerLayerEntry, loadLayered, resolveProfileExtends, resolveConfigLayers, writeLayerData } from './config-layers.mjs';
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { resolveCredentialPolicy, type McpCredentialPolicy } from './credentials.mjs';
+import { type Layering, isLowerLayerEntry, loadLayered, resolveProfileExtends, resolveConfigLayers, saveLayerData } from './config-layers.mjs';
+import { readFile, writeFile } from 'fs/promises';
 import { resolve } from 'path';
 import { resolveConfigDir } from '../config/user-config.js';
 import { McpServerRegistry, McpServerDefinition } from './registry.js';
@@ -43,6 +44,7 @@ export interface McpProfile {
 }
 
 export interface McpProfileRegistryData {
+  credentialPolicy?: McpCredentialPolicy;
   apiVersion: string;
   kind: string;
   profiles: Record<string, McpProfile>;
@@ -156,17 +158,24 @@ export class McpProfileRegistry {
       this.cache = { ...DEFAULT_DATA, profiles: {} };
     }
 
+    try {
+      resolveCredentialPolicy({ registryPolicy: this.cache.credentialPolicy, env: {} });
+    } catch (error) {
+      this.cache = null;
+      throw new Error(`Invalid MCP credential policy in ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
     return this.cache;
   }
 
-  async save(): Promise<void> {
-    if (!this.cache) return;
-    await mkdir(this.configDir, { recursive: true });
-    await writeFile(
-      this.getPath(),
-      JSON.stringify(this.layering ? writeLayerData(this.cache, 'profiles', this.layering) : this.cache, null, 2) + '\n',
-      'utf-8',
-    );
+  async save(data: McpProfileRegistryData | null = this.cache): Promise<void> {
+    if (!data) return;
+    await saveLayerData(this.getPath(), data, 'profiles', this.layers, this.layering);
+    this.cache = data;
+    if (this.layers) {
+      this.clearCache();
+      await this.load();
+    }
   }
 
   private validateName(name: string): void {
@@ -203,7 +212,7 @@ export class McpProfileRegistry {
 
   async add(profile: McpProfile, serverRegistry?: McpServerRegistry): Promise<void> {
     this.validateName(profile.name);
-    const data = await this.load();
+    const data = structuredClone(await this.load());
 
     if (data.profiles[profile.name]) {
       throw new Error(
@@ -222,7 +231,7 @@ export class McpProfileRegistry {
       updatedAt: new Date().toISOString(),
     };
 
-    await this.save();
+    await this.save(data);
   }
 
   async get(name: string): Promise<McpProfile | undefined> {
@@ -250,7 +259,7 @@ export class McpProfileRegistry {
     changes: ProfileEditChanges,
     serverRegistry?: McpServerRegistry,
   ): Promise<McpProfile> {
-    const data = await this.load();
+    const data = structuredClone(await this.load());
     const existing = data.profiles[name];
     if (!existing) throw new Error(`Profile "${name}" not found.`);
 
@@ -291,18 +300,24 @@ export class McpProfileRegistry {
 
     current.updatedAt = new Date().toISOString();
     data.profiles[name] = current;
-    await this.save();
+    await this.save(data);
     return data.profiles[name];
   }
 
   async remove(name: string): Promise<void> {
-    const data = await this.load();
+    const data = structuredClone(await this.load());
     if (!data.profiles[name]) throw new Error(`Profile "${name}" not found.`);
     if (this.layering && isLowerLayerEntry(this.layering, name)) {
       throw new Error(`Profile "${name}" is defined in a lower configuration layer; remove it there.`);
     }
+    const dependents = Object.entries(data.profiles)
+      .filter(([other, profile]) => other !== name && profile.extends?.includes(name))
+      .map(([other]) => other);
+    if (dependents.length) {
+      throw new Error(`Cannot remove profile "${name}": extended by ${dependents.join(', ')}.`);
+    }
     delete data.profiles[name];
-    await this.save();
+    await this.save(data);
   }
 
   async resolveServers(
@@ -329,12 +344,17 @@ export class McpProfileRegistry {
   async importFrom(filePath: string): Promise<{ added: number; updated: number }> {
     const content = await readFile(filePath, 'utf-8');
     const imported = JSON.parse(content) as { profiles?: Record<string, McpProfile> };
-    const data = await this.load();
+    const data = structuredClone(await this.load());
 
     let added = 0;
     let updated = 0;
 
-    const profiles = imported.profiles ?? {};
+    const profiles = imported.profiles ?? (
+      typeof imported === 'object' && !Array.isArray(imported)
+        ? imported as Record<string, McpProfile>
+        : {}
+    );
+    const candidate = { ...data.profiles };
 
     for (const [name, profile] of Object.entries(profiles)) {
       try {
@@ -342,16 +362,16 @@ export class McpProfileRegistry {
       } catch {
         continue;
       }
-      if (data.profiles[name]) {
-        data.profiles[name] = {
-          ...data.profiles[name],
+      if (candidate[name]) {
+        candidate[name] = {
+          ...candidate[name],
           ...profile,
           name,
           updatedAt: new Date().toISOString(),
         };
         updated++;
       } else {
-        data.profiles[name] = {
+        candidate[name] = {
           name,
           description: profile.description,
           ...(profile.extends ? { extends: profile.extends } : {}),
@@ -364,7 +384,9 @@ export class McpProfileRegistry {
       }
     }
 
-    await this.save();
+    for (const name of Object.keys(candidate)) resolveProfileExtends(name, candidate);
+    data.profiles = candidate;
+    await this.save(data);
     return { added, updated };
   }
 
@@ -387,7 +409,7 @@ export class McpProfileRegistry {
   }
 
   async initPresets(): Promise<{ added: number; total: number }> {
-    const data = await this.load();
+    const data = structuredClone(await this.load());
     let added = 0;
 
     for (const [name, preset] of Object.entries(PRESET_PROFILES)) {
@@ -402,7 +424,7 @@ export class McpProfileRegistry {
       }
     }
 
-    await this.save();
+    await this.save(data);
     return { added, total: Object.keys(PRESET_PROFILES).length };
   }
 

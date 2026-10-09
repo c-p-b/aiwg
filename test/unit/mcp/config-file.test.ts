@@ -64,7 +64,7 @@ describe('atomic MCP config writes', () => {
       import { writeConfigAtomic } from ${JSON.stringify(helper)};
       process.umask(0o027);
       await writeConfigAtomic(process.argv[1], '{}');
-    `, file]);
+    `, file], { timeout: 60_000 });
     expect((await stat(file)).mode & 0o777).toBe(0o640);
   });
 
@@ -82,6 +82,24 @@ describe('atomic MCP config writes', () => {
     await symlink(project, alias);
     await writeConfigAtomic(join(alias, 'mcp.json'), '{}', { projectRoot: alias });
     expect(await readFile(join(project, 'mcp.json'), 'utf8')).toBe('{}');
+  });
+
+  it('bounds registry parent checks below the config root and refuses symlinks below it', async () => {
+    const config = join(root, 'config');
+    const outside = join(root, 'outside');
+    await mkdir(config);
+    await mkdir(outside);
+    const alias = join(root, 'config-alias');
+    await symlink(config, alias);
+    await writeConfigAtomic(join(alias, 'mcp.json'), '{}', {
+      userScope: true, rejectSymlinkParents: true, symlinkRoot: alias,
+    });
+    expect(await readFile(join(config, 'mcp.json'), 'utf8')).toBe('{}');
+    await symlink(outside, join(config, 'nested'));
+    await expect(writeConfigAtomic(join(alias, 'nested/new/mcp.json'), '{}', {
+      userScope: true, rejectSymlinkParents: true, symlinkRoot: alias,
+    })).rejects.toThrow('parent directory is a symlink');
+    expect(await readdir(outside)).toEqual([]);
   });
 
   it('allows user parent symlinks and still refuses a symlinked file', async () => {

@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { spawnSync } from "child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, lstatSync, readdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from "node:os";
 import { homedir } from "os";
 import { join, resolve, sep } from "node:path";
@@ -95,11 +96,43 @@ describe("credential policy", () => {
       .toThrow("Refusing to render MCP servers with credentials: literal (headers, url userinfo); referenced (headerEnv)");
   });
 
-  it("resolves flag, then environment, then registry, then literal", () => {
+  it.each([null, "", false, 0])("refuses invalid present registry/flag policy %s", value => {
+    for (const field of ["flag", "registryPolicy"] as const) {
+      expect(() => resolveCredentialPolicy({ [field]: value, env: {} } as unknown as
+        Parameters<typeof resolveCredentialPolicy>[0])).toThrow("Unknown MCP credential policy");
+    }
+    if (value === "") {
+      expect(resolveCredentialPolicy({ registryPolicy: "none", env: { AIWG_MCP_CREDENTIAL_POLICY: "" } })).toBe("none");
+    } else {
+      expect(() => resolveCredentialPolicy({ env: { AIWG_MCP_CREDENTIAL_POLICY: value } } as unknown as
+        Parameters<typeof resolveCredentialPolicy>[0])).toThrow("Unknown MCP credential policy");
+    }
+  });
+
+  it("warns once per process per relaxed policy value", () => {
+    const helper = pathToFileURL(resolve(__dirname, "../../../src/mcp/credentials.mjs")).href;
+    const output = execFileSync(process.execPath, ["--input-type=module", "-e", `
+      import { resolveCredentialPolicy } from ${JSON.stringify(helper)};
+      const warnings = [];
+      console.warn = message => warnings.push(message);
+      for (let i = 0; i < 3; i++) {
+        resolveCredentialPolicy({ registryPolicy: 'none', flag: 'literal', env: {} });
+        resolveCredentialPolicy({ registryPolicy: 'references', flag: 'literal', env: {} });
+        resolveCredentialPolicy({ registryPolicy: 'none', flag: 'references', env: {} });
+      }
+      process.stdout.write(JSON.stringify(warnings));
+    `], { encoding: "utf-8", timeout: 60_000 });
+    expect(JSON.parse(output)).toEqual([
+      expect.stringContaining('policy "literal"'), expect.stringContaining('policy "references"'),
+    ]);
+  });
+
+  it("resolves the strictest registry, environment and flag policy", () => {
     expect(resolveCredentialPolicy({ env: {} })).toBe("literal");
     expect(resolveCredentialPolicy({ registryPolicy: "references", env: {} })).toBe("references");
     expect(resolveCredentialPolicy({ registryPolicy: "references", env: { AIWG_MCP_CREDENTIAL_POLICY: "none" } })).toBe("none");
-    expect(resolveCredentialPolicy({ flag: "references", registryPolicy: "none", env: { AIWG_MCP_CREDENTIAL_POLICY: "none" } })).toBe("references");
+    expect(resolveCredentialPolicy({ flag: "references", registryPolicy: "none", env: { AIWG_MCP_CREDENTIAL_POLICY: "none" } })).toBe("none");
+    expect(resolveCredentialPolicy({ registryPolicy: "references", env: { AIWG_MCP_CREDENTIAL_POLICY: "literal" } })).toBe("references");
     expect(() => resolveCredentialPolicy({ flag: "lax", env: {} })).toThrow(/Unknown MCP credential policy/);
   });
 });
@@ -452,13 +485,14 @@ describe("aiwg mcp inject credential flags", () => {
     expect(JSON.parse(readFileSync(out, "utf-8"))).toEqual({ mcpServers: { bare: { type: "http", url: "https://bare.example/mcp" } } });
   });
 
-  it("applies the registry policy set by credential-policy, and the environment overrides it", () => {
+  it("applies the registry policy and refuses environment relaxation", () => {
     registry([{ name: "leaky", type: "stdio", command: "leaky", env: { TOKEN: "literal" } }]);
     run(["credential-policy", "references"]);
     expect(run(["credential-policy"]).trim()).toBe("references");
     expect(runFailing(["inject", "--provider", "cursor"]).stderr).toContain("leaky (env)");
-    run(["inject", "--provider", "cursor"], { AIWG_MCP_CREDENTIAL_POLICY: "literal" });
-    expect(JSON.parse(readFileSync(join(projectDir, ".cursor/mcp.json"), "utf-8")).mcpServers.leaky.env).toEqual({ TOKEN: "literal" });
+    expect(() => run(["inject", "--provider", "cursor"], { AIWG_MCP_CREDENTIAL_POLICY: "literal" }))
+      .toThrow(/credential policy floor|Refusing to render/);
+    expect(existsSync(join(projectDir, ".cursor/mcp.json"))).toBe(false);
   });
 
   it("stores --env-from as a variable name only", () => {

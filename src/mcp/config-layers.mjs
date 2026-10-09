@@ -15,8 +15,10 @@
  * explicit directory, the single-directory behaviour applies unchanged.
  */
 
-import { readFile } from 'fs/promises';
-import { delimiter, resolve } from 'path';
+import { lstat, mkdtemp, readFile, readlink, realpath, rmdir } from 'fs/promises';
+import { basename, delimiter, dirname, isAbsolute, relative, resolve, sep } from 'path';
+import { assertConfigDestination, assertNoSymlinkParents, writeConfigAtomic } from './config-file.mjs';
+import { resolveCredentialPolicy, warnCredentialPolicyRelaxation } from './credentials.mjs';
 
 export function resolveConfigLayers(configDirOverride, env = process.env) {
   if (configDirOverride) return null;
@@ -56,7 +58,8 @@ function comparable(entry) {
 
 /**
  * Read `filename` from every layer and merge the `collection` map by entry
- * name. Top-level fields come from the highest layer that sets them.
+ * name. Top-level fields come from the highest layer that sets them, except
+ * credentialPolicy, which keeps the strictest policy across layers.
  *
  * Returns the merged data and a layering record: the names defined in the
  * write layer, and comparable forms of entries and top-level fields in lower layers.
@@ -67,15 +70,28 @@ export async function loadLayered(layers, filename, collection, defaults) {
   const own = new Set();
   const lowerFields = new Map();
   const ownFields = new Set();
+  let ownPolicy;
+  let lowerPolicy;
   const writeLayer = layers.length - 1;
   for (const [index, dir] of layers.entries()) {
     const parsed = await readLayer(resolve(dir, filename));
     if (!parsed) continue;
     const { [collection]: entries, ...rest } = parsed;
+    if (index === writeLayer) ownPolicy = rest.credentialPolicy;
+    let policy = merged.credentialPolicy;
+    if (Object.hasOwn(rest, 'credentialPolicy')) {
+      try {
+        policy = resolveCredentialPolicy({ registryPolicy: merged.credentialPolicy, flag: rest.credentialPolicy, env: {} });
+      } catch (error) {
+        throw new Error(`Invalid MCP credential policy in layer ${resolve(dir, filename)}: ${error.message}`);
+      }
+    }
     Object.assign(merged, rest);
-    for (const [field, value] of Object.entries(rest)) {
+    if (policy !== undefined) merged.credentialPolicy = policy;
+    if (index < writeLayer) lowerPolicy = policy;
+    for (const field of Object.keys(rest)) {
       if (index === writeLayer) ownFields.add(field);
-      else lowerFields.set(field, comparable({ value }));
+      else lowerFields.set(field, comparable({ value: merged[field] }));
     }
     for (const [name, entry] of Object.entries(entries || {})) {
       merged[collection][name] = entry;
@@ -83,7 +99,7 @@ export async function loadLayered(layers, filename, collection, defaults) {
       else lower.set(name, comparable(entry));
     }
   }
-  return { data: merged, layering: { lower, own, lowerFields, ownFields } };
+  return { data: merged, layering: { lower, own, lowerFields, ownFields, ownPolicy, lowerPolicy, effectivePolicy: merged.credentialPolicy } };
 }
 
 /** True when the entry is defined only below the write layer. */
@@ -97,13 +113,124 @@ export function isLowerLayerEntry(layering, name) {
  * Top-level fields follow the same rule, without entry bookkeeping exclusions;
  * apiVersion and kind are always kept so the file stays self-describing.
  */
-export function writeLayerData(data, collection, layering) {
+export function writeLayerData(data, collection, layering, explicitPolicy = false) {
   const entries = Object.entries(data[collection] || {}).filter(([name, entry]) =>
     layering.own.has(name) || !layering.lower.has(name) || comparable(entry) !== layering.lower.get(name));
   const fields = Object.entries(data).filter(([field, value]) => field !== collection && (
     FORMAT_FIELDS.includes(field) || layering.ownFields.has(field) || !layering.lowerFields.has(field) ||
     comparable({ value }) !== layering.lowerFields.get(field)));
-  return { ...Object.fromEntries(fields), [collection]: Object.fromEntries(entries) };
+  const persisted = { ...Object.fromEntries(fields), [collection]: Object.fromEntries(entries) };
+  // A setter explicitly writes even when its value equals the merged floor.
+  // Other saves retain policy ownership, without copying an inherited floor.
+  if (explicitPolicy || data.credentialPolicy !== layering.effectivePolicy) {
+    const effective = resolveCredentialPolicy({
+      flag: data.credentialPolicy, registryPolicy: layering.lowerPolicy, env: {},
+    });
+    if (effective !== data.credentialPolicy) {
+      throw new Error(`Cannot relax MCP credential policy floor "${effective}" to "${data.credentialPolicy}".`);
+    }
+    persisted.credentialPolicy = data.credentialPolicy;
+  } else if (layering.ownPolicy !== undefined &&
+    resolveCredentialPolicy({ flag: layering.ownPolicy, registryPolicy: layering.lowerPolicy, env: {} }) !== layering.ownPolicy) {
+    delete persisted.credentialPolicy;
+    warnCredentialPolicyRelaxation(layering.ownPolicy, layering.lowerPolicy);
+    console.warn(`Dropping ignored MCP overlay credential policy "${layering.ownPolicy}" on save.`);
+  }
+  return persisted;
+}
+
+/** Resolve a target, including a missing suffix, without creating it. */
+async function targetRealpath(path, aliases = []) {
+  const absolute = resolve(path);
+  if (aliases.includes(absolute)) throw new Error(`MCP configuration target symlink cycle: ${[...aliases, absolute].join(' -> ')}`);
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    // Resolve dangling aliases too: creating their missing referent would change
+    // a lower layer even though realpath currently reports ENOENT.
+    if (dirname(absolute) === absolute) throw error;
+    const candidate = resolve(await targetRealpath(dirname(absolute), aliases), basename(absolute));
+    try {
+      if ((await lstat(candidate)).isSymbolicLink()) {
+        return targetRealpath(resolve(dirname(candidate), await readlink(candidate)), [...aliases, absolute]);
+      }
+    } catch (statError) {
+      if (statError.code !== 'ENOENT') throw statError;
+    }
+    return candidate;
+  }
+}
+
+/** Probe the filesystem containing the nearest existing ancestor of a target. */
+export async function isCaseInsensitivePath(path) {
+  let ancestor = resolve(path);
+  while (true) {
+    try {
+      await realpath(ancestor);
+      break;
+    } catch (error) {
+      if (error.code !== 'ENOENT' || dirname(ancestor) === ancestor) throw error;
+      ancestor = dirname(ancestor);
+    }
+  }
+  let probe;
+  try {
+    probe = await mkdtemp(resolve(ancestor, '.aiwg-case-probe-a-'));
+    const alternate = resolve(dirname(probe), basename(probe).toUpperCase());
+    try {
+      const [original, folded] = await Promise.all([lstat(probe), lstat(alternate)]);
+      return original.dev === folded.dev && original.ino === folded.ino;
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
+  } catch (error) {
+    // Read-only ancestors cannot be probed: compare conservatively rather than allow overlap.
+    if (error.code === 'EACCES' || error.code === 'EPERM' || error.code === 'EROFS') return true;
+    throw error;
+  } finally {
+    if (probe) await rmdir(probe);
+  }
+}
+
+function inside(target, parent, caseInsensitive) {
+  const rel = relative(caseInsensitive ? parent.toLowerCase() : parent, caseInsensitive ? target.toLowerCase() : target);
+  return !rel || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** Refuse a write that could modify another configuration layer. */
+export async function assertLayerWriteDestination(layers, filename) {
+  const targets = await Promise.all(layers.map(async dir => ({
+    dir: await targetRealpath(dir),
+    files: await Promise.all(['mcp-servers.json', 'mcp-profiles.json'].map(name => targetRealpath(resolve(dir, name)))),
+  })));
+  const write = targets[targets.length - 1];
+  const caseInsensitive = await isCaseInsensitivePath(write.dir);
+  const writeFile = await targetRealpath(resolve(layers[layers.length - 1], filename));
+  for (const lower of targets.slice(0, -1)) {
+    if (inside(write.dir, lower.dir, caseInsensitive) || inside(writeFile, lower.dir, caseInsensitive) || lower.files.some(file => inside(writeFile, file, caseInsensitive))) {
+      throw new Error(`Refusing overlapping MCP configuration layer targets: ${writeFile} overlaps ${lower.dir}`);
+    }
+  }
+  const file = resolve(layers[layers.length - 1], filename);
+  await assertNoSymlinkParents(file, layers[layers.length - 1]);
+  await assertConfigDestination(file);
+}
+
+/** Persist atomically, then refresh ownership only after a successful write. */
+export async function saveLayerData(file, data, collection, layers, layering, explicitPolicy = false) {
+  if (layers) await assertLayerWriteDestination(layers, basename(file));
+  const persisted = layering ? writeLayerData(data, collection, layering, explicitPolicy) : data;
+  await writeConfigAtomic(file, JSON.stringify(persisted, null, 2) + '\n', {
+    userScope: true, rejectSymlinkParents: true,
+  });
+  if (layering) {
+    layering.own = new Set(Object.keys(persisted[collection] || {}));
+    layering.ownFields = new Set(Object.keys(persisted).filter(field => field !== collection));
+    layering.ownPolicy = persisted.credentialPolicy;
+    layering.effectivePolicy = data.credentialPolicy;
+  }
 }
 
 /**

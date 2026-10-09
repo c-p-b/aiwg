@@ -1,11 +1,11 @@
-import { type Layering, isLowerLayerEntry, loadLayered, resolveConfigLayers, writeLayerData } from './config-layers.mjs';
+import { type Layering, isLowerLayerEntry, loadLayered, resolveConfigLayers, saveLayerData } from './config-layers.mjs';
 import { assertConfigDestination, assertProjectCredentials, isUserMcpScope, writeConfigAtomic, writeConfigTransaction } from './config-file.mjs';
 import { manageOmpMcp } from './omp-config.mjs';
 import { manageGrokBuildMcp } from './grok-build-config.mjs';
 import { replaceServer } from './toml-editor.mjs';
 import { resolveOmpPaths } from '../providers/omp-paths.mjs';
 import { applyJsonToolFilterPlan, claudeSettingsPath, prepareClaudePermissions, planToolFilters, type ToolFilterPlan, type ToolFilters } from './tool-filters.mjs';
-import { assertCredentialPolicy, renderCredentialMaps, validateEnvReferenceName, type McpCredentialPolicy } from './credentials.mjs';
+import { assertCredentialPolicy, resolveCredentialPolicy, renderCredentialMaps, validateEnvReferenceName, type McpCredentialPolicy } from './credentials.mjs';
 /**
  * MCP Server Registry
  *
@@ -16,7 +16,7 @@ import { assertCredentialPolicy, renderCredentialMaps, validateEnvReferenceName,
  * @implements #554
  */
 
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile } from 'fs/promises';
 import { dirname, resolve } from 'path';
 import { homedir } from 'os';
 import { resolveConfigDir } from '../config/user-config.js';
@@ -184,21 +184,31 @@ export class McpServerRegistry {
       this.cache = { ...DEFAULT_REGISTRY, servers: {} };
     }
 
+    try {
+      resolveCredentialPolicy({ registryPolicy: this.cache.credentialPolicy, env: {} });
+    } catch (error) {
+      this.cache = null;
+      throw new Error(`Invalid MCP credential policy in ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
     return this.cache;
   }
 
   /** Save the registry to disk */
-  async save(): Promise<void> {
-    if (!this.cache) return;
-    await mkdir(this.configDir, { recursive: true });
-    const filePath = this.getPath();
-    await writeFile(filePath, JSON.stringify(this.layering ? writeLayerData(this.cache, 'servers', this.layering) : this.cache, null, 2) + '\n', 'utf-8');
+  async save(data: McpRegistryData | null = this.cache, explicitPolicy = false): Promise<void> {
+    if (!data) return;
+    await saveLayerData(this.getPath(), data, 'servers', this.layers, this.layering, explicitPolicy);
+    this.cache = data;
+    if (this.layers) {
+      this.clearCache();
+      await this.load();
+    }
   }
 
   /** Add a new MCP server definition */
   async add(def: McpServerDefinition): Promise<void> {
     validateCredentialReferences(def);
-    const data = await this.load();
+    const data = structuredClone(await this.load());
 
     if (data.servers[def.name]) {
       throw new Error(`Server "${def.name}" already exists. Use "update" to modify it.`);
@@ -211,12 +221,12 @@ export class McpServerRegistry {
       updatedAt: new Date().toISOString(),
     };
 
-    await this.save();
+    await this.save(data);
   }
 
   /** Remove an MCP server definition */
   async remove(name: string): Promise<void> {
-    const data = await this.load();
+    const data = structuredClone(await this.load());
 
     if (!data.servers[name]) {
       throw new Error(`Server "${name}" not found.`);
@@ -226,12 +236,12 @@ export class McpServerRegistry {
       throw new Error(`Server "${name}" is defined in a lower configuration layer; remove it there.`);
     }
     delete data.servers[name];
-    await this.save();
+    await this.save(data);
   }
 
   /** Update an existing MCP server definition */
   async update(name: string, updates: Partial<Omit<McpServerDefinition, 'name'>>): Promise<void> {
-    const data = await this.load();
+    const data = structuredClone(await this.load());
 
     if (!data.servers[name]) {
       throw new Error(`Server "${name}" not found.`);
@@ -246,7 +256,7 @@ export class McpServerRegistry {
     validateCredentialReferences(next);
     data.servers[name] = next;
 
-    await this.save();
+    await this.save(data);
   }
 
   /** Get a specific server definition */
@@ -263,7 +273,7 @@ export class McpServerRegistry {
 
   /** Record that a server was injected into a provider */
   async recordInjection(name: string, provider: string): Promise<void> {
-    const data = await this.load();
+    const data = structuredClone(await this.load());
     const server = data.servers[name];
     if (!server) return;
 
@@ -274,7 +284,7 @@ export class McpServerRegistry {
       server.injectedProviders.push(provider);
     }
 
-    await this.save();
+    await this.save(data);
   }
 
   /** Get all providers that have had servers injected */
@@ -296,10 +306,13 @@ export class McpServerRegistry {
   }
 
   async setCredentialPolicy(policy: McpCredentialPolicy): Promise<void> {
-    const data = await this.load();
+    const data = structuredClone(await this.load());
+    const effective = resolveCredentialPolicy({ flag: policy, registryPolicy: this.layering?.lowerPolicy, env: {} });
+    if (effective !== policy) {
+      throw new Error(`Cannot relax MCP credential policy floor "${effective}" to "${policy}".`);
+    }
     data.credentialPolicy = policy;
-    this.layering?.ownFields.add('credentialPolicy');
-    await this.save();
+    await this.save(data, true);
   }
 
   /** Clear the in-memory cache */
@@ -549,7 +562,7 @@ export async function injectServers(
 
   // Get servers to inject
   let allServers = await registry.list();
-  if (serverFilter && serverFilter.length > 0) {
+  if (serverFilter !== undefined) {
     allServers = allServers.filter(s => serverFilter.includes(s.name));
   }
 
@@ -562,7 +575,9 @@ export async function injectServers(
     return result;
   }
 
-  assertCredentialPolicy(allServers, options.credentialPolicy);
+  assertCredentialPolicy(allServers, resolveCredentialPolicy({
+    flag: options.credentialPolicy, registryPolicy: await registry.getCredentialPolicy(),
+  }));
 
   const userScope = isUserMcpScope(provider, options.scope);
   const projectRoot = userScope ? undefined : projectDir;

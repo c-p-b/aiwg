@@ -138,16 +138,38 @@ aiwg mcp inject --provider claude --profile acme-dev --ephemeral --out /tmp/acme
 | Rule | Behaviour |
 | --- | --- |
 | Precedence | A server or profile in a later layer replaces the entry of the same name in an earlier one, whole |
-| Top-level (`credentialPolicy`) | Highest layer that sets it wins; writes never copy lower settings to last layer |
-| Writes | `add`, `update`, `profile add/edit` and injection records go to the last layer only |
+| `credentialPolicy` | Strictest policy across all layers wins; inherited settings are never copied on writes |
+| Writes | Last layer only; atomic replacement refuses symlink files and overlapping layer targets |
 | Lower-layer entries | Updating one copies it into the last layer; removing one is refused |
 | `extends` | A profile inherits the servers of each base profile (base first), from any layer |
-| Tool filters under `extends` | `toolDeny` accumulates along the chain; `toolAllow` comes from the most-derived profile that sets it |
+| Tool filters under `extends` | `toolDeny` accumulates; the most-derived `toolAllow` wins |
 | Set | `AIWG_CONFIG` is ignored for MCP servers and profiles |
 | Unset | `AIWG_CONFIG` or `~/.aiwg` is the single directory, as before |
 
 Injection records (`injectedProviders`, used by `inject --all`) for a server defined in a lower layer
 are not persisted, so that the last layer holds no copy of an unchanged organisation entry.
+Inherited top-level settings are also left out of writes; `apiVersion` and `kind` remain as format fields.
+After an update copies an entry into the write layer, the same registry instance can remove that overlay.
+The lower-layer entry becomes visible again immediately on that instance, and adding its name is refused.
+A profile cannot be removed while other profiles in any layer extend it; the error names the dependents.
+Rejected mutations leave the cached view unchanged. An empty profile injects zero servers in either mode.
+Config directory aliases and symlinked ancestors are supported, including dotfile-manager links.
+Symlinks below the config directory and symlinked files remain refused. Overlap uses resolved realpaths;
+missing suffixes are compared with case folding on case-insensitive filesystems. A temporary probe in the
+nearest existing ancestor detects filesystem behavior; unprobeable ancestors use conservative case folding.
+Profile import validates the complete candidate `extends` graph across all layers before writing;
+cycles and missing bases are refused with the offending profile names.
+
+The organisation layer (the lowest layer that sets `credentialPolicy`) establishes a floor.
+Strictness is `literal` < `references` < `none`: team, identity and project layers can tighten it,
+but a relaxation is ignored with a warning once per process per attempted value. The effective policy
+is the strictest value set in any layer. Maintainers can change the authoritative layer's policy directly,
+or change an overlay with `aiwg mcp credential-policy <policy>` within its lower-layer floor; CLI attempts to
+relax below that floor are refused. To relax the effective policy, adjust every layer that imposes
+a stricter value. Environment variables and rendering flags can only tighten the effective policy.
+An unrelated save preserves an owned policy without copying an inherited floor; a stale overlay value
+weaker than the floor is dropped with a warning on the next save. Explicit policy writes are preserved,
+including a write equal to the floor. Invalid values in layer files report the file path.
 
 ## Profile Tool Filters
 
@@ -265,8 +287,15 @@ The credential policy decides what `aiwg mcp inject` will render:
 `references` refuses literal `env`/`headers`, URL userinfo and OAuth client secrets.
 
 A refusal names each server and field, exits non-zero and writes nothing, including in `--ephemeral`
-mode. Precedence is the flag, then `AIWG_MCP_CREDENTIAL_POLICY`, then the registry default set with
-`aiwg mcp credential-policy <policy>`. `aiwg session --provider codex --profile <p>` applies the same
+mode. The strictest of the registry policy, `AIWG_MCP_CREDENTIAL_POLICY` and the rendering flag wins.
+Environment or flag attempts to relax the registry floor warn once per process per attempted value.
+This also applies to a single registry with no layers: unlike #280, a command flag or environment value
+cannot relax its stored policy. Change the stored policy with the command below to permit a weaker value.
+The exported `injectServers` API enforces the same floor, including when its policy option is omitted.
+Policy values must be `literal`, `references` or `none`; present `null`, `""`, `false` and `0` are invalid.
+An empty `AIWG_MCP_CREDENTIAL_POLICY` environment string is treated as unset.
+Set the registry policy with `aiwg mcp credential-policy <policy>`.
+`aiwg session --provider codex --profile <p>` applies the same
 policy before setup and launch. Any setup failure prevents launch and reuse of an existing runtime
 config. With `--persist`, successful injection launches against the default Codex home.
 
